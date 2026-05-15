@@ -367,6 +367,8 @@ async function main() {
         if (!billDateMs) errors.push('开单日期无法识别');
         // 校验档口名称是否仍含地址信息（楼层房号等）
         if (shopName && /(?:富|负)?[一二三四五六七八九十\d]+楼-?[a-zA-Z]?\d*(?:号|$)/.test(shopName)) errors.push('档口名称错误');
+        // 上次余额、累计结余、付款金额都为0，标记金额出错
+        if (prevBalance === 0 && cumBalance === 0 && paymentAmt === 0) errors.push('金额出错');
         let errorNote = errors.join(' ');
 
         // 上传截图
