@@ -66,7 +66,7 @@ function getPinyinInitials(chinese) {
         const tmp = path.join(__dirname, '_pinyin_input.txt');
         fs.writeFileSync(tmp, chinese, 'utf-8');
         const result = execSync(
-            `python -W ignore -c "import sys; sys.path.insert(0, r'C:\\\\Users\\\\Administrator\\\\.openclaw\\\\workspace'); from bill_check import get_pinyin_initials; t=open(r'${tmp}',encoding='utf-8').read(); print(get_pinyin_initials(t),end='')"`,
+            `python -W ignore -c "import sys; sys.path.insert(0, r'${__dirname.replace(/\\/g, '\\\\')}'); from bill_check import get_pinyin_initials; t=open(r'${tmp}',encoding='utf-8').read(); print(get_pinyin_initials(t),end='')"`,
             { encoding: 'utf-8', timeout: 5000, env: { ...process.env, PYTHONWARNINGS: 'ignore' } }
         );
         fs.unlinkSync(tmp);
@@ -485,6 +485,8 @@ function extractGoodsCost(text, shopAbbr) {
     // 找到"款号"所在的列位置
     let codeColIndex = -1;
     let priceColIndex = -1;
+    let headerColCount = 0;
+    let headerHasSubtotal = false;
     let foundHeader = false;
     let dataStarted = false;
 
@@ -530,9 +532,11 @@ function extractGoodsCost(text, shopAbbr) {
             if (tmpCodeCol >= 0) {
                 codeColIndex = tmpCodeCol;
                 priceColIndex = tmpPriceCol;  // 可能为 -1（未找到单价）
+                headerColCount = parts.length;
+                headerHasSubtotal = parts.some(p => p.includes('小计'));
                 foundHeader = true;
                 dataStarted = false;
-                console.log(`  [4号] 找到表头: 款号列=${codeColIndex}, 价格列=${priceColIndex}`);
+                console.log(`  [4号] 找到表头: 款号列=${codeColIndex}, 价格列=${priceColIndex}, 列数=${headerColCount}, 含小计=${headerHasSubtotal}`);
             }
             continue;
         }
@@ -560,7 +564,7 @@ function extractGoodsCost(text, shopAbbr) {
             // 获取款号：优先用codeColIndex，列数不够时fallback到行中第一个候选
             let codeStr = '';
             if (parts.length > codeColIndex && codeColIndex >= 0) {
-                codeStr = parts[codeColIndex].replace(/补/g, '').replace(/[#款]/g, '');
+                codeStr = parts[codeColIndex].replace(/补/g, '').replace(/[#款]/g, '').replace(/\[[\d]*\]\([^)]*\)/g, '');
             } else if (parts.length > 0) {
                 const candidate = parts[0].replace(/补/g, '').replace(/[#款]/g, '');
                 if (/^\d+[a-zA-Z\u4e00-\u9fa5]+/.test(candidate) || /^\d{2,}$/.test(candidate)) {
@@ -584,8 +588,11 @@ function extractGoodsCost(text, shopAbbr) {
             }
 
             // 获取价格：用表头识别的priceColIndex（如果正确识别了价格列），直接从该列取值
+            // 当表头含"小计"且数据列数不匹配时（如缺少"名称"列），priceCol会错位，直接走fallback
             let unitPrice = 0;
-            if (priceColIndex >= 0 && priceColIndex > codeColIndex && priceColIndex < parts.length && parts[priceColIndex]) {
+            const canUsePriceCol = priceColIndex >= 0 && priceColIndex > codeColIndex && priceColIndex < parts.length
+                && (!headerHasSubtotal || headerColCount === parts.length);
+            if (canUsePriceCol && parts[priceColIndex]) {
                 const rawPrice = parts[priceColIndex].replace(/[,，]/g, '');
                 if (/^-?[\d.]+$/.test(rawPrice)) {
                     const v = parseFloat(rawPrice);
@@ -718,7 +725,12 @@ async function syncToTbl4(srcRecord, srcTime) {
                 const oldNote = existing.note || '';
                 const newNote = `[${recordTimeStr}] ${shopName} 成本更新为${g.cost}`;
                 const mergedNote = oldNote ? `${oldNote}\n${newNote}` : newNote;
-                const mergedScreenshots = screenshotField ? [...existing.screenshots, screenshotField[0]] : existing.screenshots;
+                let mergedScreenshots = screenshotField ? [...existing.screenshots, screenshotField[0]] : existing.screenshots;
+                // 只保留最新的3张截图
+                if (mergedScreenshots.length > 3) {
+                    mergedScreenshots = mergedScreenshots.slice(-3);
+                    console.log(`  [4号] 截图超过3张，只保留最新3张`);
+                }
                 const res = await updateRecord(TBL4, existing.id, {
                     '成本': g.cost,
                     '记录时间': recordTimeStr,

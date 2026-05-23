@@ -8,8 +8,9 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const PORT = 3000;
-const WORKSPACE = 'C:\\Users\\Administrator\\.openclaw\\workspace';
-const COOKIES_DIR = 'C:\\Users\\Administrator\\.openclaw\\cookies';
+// 项目独立运行，路径基于脚本所在目录
+const WORKSPACE = __dirname;
+const COOKIES_DIR = path.join(__dirname, 'cookies');
 
 // 日志文件
 const LOG_FILE = path.join(WORKSPACE, 'bill.log');
@@ -141,7 +142,6 @@ const server = http.createServer((req, res) => {
             res.end(JSON.stringify({ success: false, message: '已有运行的进程' }));
             return;
         }
-        if (fs.existsSync(LOG_FILE)) { fs.writeFileSync(LOG_FILE, ''); }
         isBillCheckRunning = true;
         let body = '';
         req.on('data', chunk => body += chunk);
@@ -149,7 +149,7 @@ const server = http.createServer((req, res) => {
             log('=== 开始录入票据 ===');
 
             const billCheckPy = path.join(WORKSPACE, 'bill_image.py');
-            const py = spawn('python', [billCheckPy], {
+            const py = spawn('python', ['-u', billCheckPy], {
                 shell: true,
                 cwd: WORKSPACE
             });
@@ -184,7 +184,6 @@ const server = http.createServer((req, res) => {
 
     // 整理票据 - 使用 arrange2.js
     if (req.url === '/run-arrange' && req.method === 'POST') {
-        if (fs.existsSync(LOG_FILE)) { fs.writeFileSync(LOG_FILE, ''); }
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', () => {
@@ -226,9 +225,8 @@ const server = http.createServer((req, res) => {
             res.end(JSON.stringify({ success: false, message: '已有运行的进程' }));
             return;
         }
-        if (fs.existsSync(LOG_FILE)) { fs.writeFileSync(LOG_FILE, ''); }
         // 清理旧的cookie过期标记
-        const markerFile = 'C:\\Users\\Administrator\\.openclaw\\cookie_expired.txt';
+        const markerFile = path.join(WORKSPACE, 'cookie_expired.txt');
         if (fs.existsSync(markerFile)) { try { fs.unlinkSync(markerFile); } catch (e) {} }
         let body = '';
         req.on('data', chunk => body += chunk);
@@ -247,17 +245,17 @@ const server = http.createServer((req, res) => {
             log(`=== 开始获取抖店商品信息 (目标${targetCount}个) [${shopName}] ===`);
 
             // 将店铺名写入临时文件（避免编码问题）
-            const shopNameFile = 'C:\\Users\\Administrator\\.openclaw\\current_shop.txt';
+            const shopNameFile = path.join(WORKSPACE, 'current_shop.txt');
             fs.writeFileSync(shopNameFile, shopName);
 
             // 将费用配置写入临时文件
-            const feeConfigFile = 'C:\\Users\\Administrator\\.openclaw\\fee_config.json';
+            const feeConfigFile = path.join(WORKSPACE, 'fee_config.json');
             fs.writeFileSync(feeConfigFile, JSON.stringify({ shippingFee, insurance }));
 
-            const douyinScript = 'C:\\Users\\Administrator\\douyin-shop-analyzer.js';
+            const douyinScript = path.join(WORKSPACE, 'douyin-shop-analyzer.js');
             const node = spawn('node', [douyinScript, targetCount.toString()], {
                 shell: true,
-                cwd: 'C:\\Users\\Administrator'
+                cwd: WORKSPACE
             });
             currentProcess = node;
 
@@ -303,7 +301,7 @@ const server = http.createServer((req, res) => {
                 currentProcess = null;
                 isDouyinRunning = false;
                 // 检查cookie过期标记文件
-                const markerFile = 'C:\\Users\\Administrator\\.openclaw\\cookie_expired.txt';
+                const markerFile = path.join(WORKSPACE, 'cookie_expired.txt');
                 log(`[DEBUG] 检查标记文件: ${markerFile}, 存在=${fs.existsSync(markerFile)}`);
                 if (fs.existsSync(markerFile)) {
                     try {
@@ -340,9 +338,8 @@ const server = http.createServer((req, res) => {
             res.end(JSON.stringify({ success: false, message: '已有运行的进程' }));
             return;
         }
-        if (fs.existsSync(LOG_FILE)) { fs.writeFileSync(LOG_FILE, ''); }
         // 清理旧的cookie过期标记
-        const markerFile2 = 'C:\\Users\\Administrator\\.openclaw\\cookie_expired.txt';
+        const markerFile2 = path.join(WORKSPACE, 'cookie_expired.txt');
         if (fs.existsSync(markerFile2)) { try { fs.unlinkSync(markerFile2); } catch (e) {} }
         let body = '';
         req.on('data', chunk => body += chunk);
@@ -363,17 +360,17 @@ const server = http.createServer((req, res) => {
             log(`=== 开始多次获取抖店商品信息 (目标${targetCount}个, 间隔${intervalMinutes}分钟) [${shopName}] ===`);
 
             // 将店铺名写入临时文件（避免编码问题）
-            const shopNameFile = 'C:\\Users\\Administrator\\.openclaw\\current_shop.txt';
+            const shopNameFile = path.join(WORKSPACE, 'current_shop.txt');
             fs.writeFileSync(shopNameFile, shopName);
 
             // 将费用配置写入临时文件
-            const feeConfigFile = 'C:\\Users\\Administrator\\.openclaw\\fee_config.json';
+            const feeConfigFile = path.join(WORKSPACE, 'fee_config.json');
             fs.writeFileSync(feeConfigFile, JSON.stringify({ shippingFee, insurance }));
 
-            const douyinScript = 'C:\\Users\\Administrator\\douyin-shop-analyzer.js';
+            const douyinScript = path.join(WORKSPACE, 'douyin-shop-analyzer.js');
             const node = spawn('node', [douyinScript, targetCount.toString(), intervalMinutes.toString(), 'multi'], {
                 shell: true,
-                cwd: 'C:\\Users\\Administrator'
+                cwd: WORKSPACE
             });
             currentProcess = node;
 
@@ -416,7 +413,7 @@ const server = http.createServer((req, res) => {
                 currentProcess = null;
                 isDouyinMultiRunning = false;
                 // 检查cookie过期标记文件
-                const markerFile = 'C:\\Users\\Administrator\\.openclaw\\cookie_expired.txt';
+                const markerFile = path.join(WORKSPACE, 'cookie_expired.txt');
                 if (fs.existsSync(markerFile)) {
                     try {
                         const expiredShop = fs.readFileSync(markerFile, 'utf-8').trim();
@@ -451,7 +448,6 @@ const server = http.createServer((req, res) => {
 
     // 登录新店铺
     if (req.url === '/login-new-shop' && req.method === 'POST') {
-        if (fs.existsSync(LOG_FILE)) { fs.writeFileSync(LOG_FILE, ''); }
         log('=== 开始登录新店铺 ===');
 
         const loginScript = path.join(WORKSPACE, 'login-shop.js');

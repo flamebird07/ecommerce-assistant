@@ -139,8 +139,8 @@ function parseBillDate(ocrText) {
 }
 
 function parseBatch(ocrText) {
-    // 先尝试批次（行首或换行后，兼容"- "前缀），再尝试小票/单号
-    const m = ocrText.match(/(?:^|\n)\s*(?:[-*]\s*)?(?:批次|小票|单号)[:：]\s*(\S+)/);
+    // 先尝试批次（行首或换行后，兼容"- "前缀），再尝试小票/单号/单据号
+    const m = ocrText.match(/(?:^|\n)\s*(?:[-*]\s*)?(?:批次|小票|单号|单据号)[:：]\s*(\S+)/);
     let b = '';
     if (m) b = m[1].replace(/^[^0-9A-Za-z]+/, '').trim();
     // 兼容订单编号
@@ -294,6 +294,8 @@ function parseRealReceived(ocrText) {
 }
 
 function parseTotal(ocrText) {
+    const m0 = ocrText.match(/扫码支付[:：]\s*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
+    if (m0) return parseFloat(m0[1]);
     const m = ocrText.match(/(?:实付|已付|付款)[:：]\s*[¥￥]?\s*(-?\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
     if (m) return parseFloat(m[1]);
     const m2 = ocrText.match(/微信(?:账户|支付)?[:：]\s*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
@@ -403,6 +405,9 @@ async function main() {
         };
         if (billDateMs) fields["开单日期"] = billDateMs;
         if (fileToken) fields["单据截图"] = [{ file_token: fileToken, name: `bill_seg${segId}.jpg` }];
+
+        // 录入日志
+        console.log(`  [${i+1}/${bills.length}] 档口:${shopName || '??'} 批次:${batchNo || '??'} 上次结余:${prevBalance} 累计结余:${cumBalance} 付款:${paymentAmt} ${errorNote ? '⚠ ' + errorNote : '✓'}`);
 
         await sleep(500);  // 限速延迟
         const res = await createRecord(token, fields);

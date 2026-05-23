@@ -21,7 +21,7 @@ API_KEY = "44e38313-658a-4245-986f-e45f9bc66fff"
 ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v1/chat/completions"
 ARK_MODEL = "doubao-seed-1-8-251228"
 VIDEO_DIR = r"C:\Users\Administrator\Desktop\票据视频"
-WRITE_FINAL_JS = r"C:\Users\Administrator\.openclaw\workspace\write_final.js"
+WRITE_FINAL_JS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "write_final.js")
 
 IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp'}
 
@@ -200,18 +200,19 @@ def process_image(img_path, record_time, seq_no):
     with open(tmp_json, 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
 
+    # 实时输出write_final.js的日志（不捕获，直接显示）
     r = subprocess.run(['node', WRITE_FINAL_JS, tmp_json,
         'CfAXbSrUFaBLv3stSRrcuUVon1b', 'tblua6KaZ6PiWAp6',
         record_time, img_path, seq_no],
-        capture_output=True, text=True, encoding='utf-8', errors='replace')
+        text=True, encoding='utf-8', errors='replace')
     os.remove(tmp_json)
 
-    # 判断：只要飞书返回 code=0（record_res:{"code":0}）就算录入成功
-    ok = re.search(r'"code"\s*:\s*0', r.stderr) is not None
+    # 判断：检查返回码
+    ok = r.returncode == 0
     if ok:
         print(f"  ✅ 录入成功")
     else:
-        print(f"  ⚠️ 录入失败: stdout={r.stdout[:500]} stderr={r.stderr[:500]}")
+        print(f"  ⚠️ 录入失败 (code={r.returncode})")
     return ok
 
 def main():
@@ -223,6 +224,9 @@ def main():
     print(f"[SCAN] {target_dir}")
     files = []
     for f in os.listdir(target_dir):
+        # 跳过已录入的图片
+        if f.startswith('已录入_'):
+            continue
         ext = os.path.splitext(f)[1].lower()
         if ext in IMAGE_EXTS:
             files.append(os.path.join(target_dir, f))
@@ -233,7 +237,18 @@ def main():
 
     for i, img_path in enumerate(files):
         seq = f"{i+1:03d}"
-        process_image(img_path, record_time_ms, seq)
+        ok = process_image(img_path, record_time_ms, seq)
+        # 录入成功后重命名图片
+        if ok:
+            try:
+                ext = os.path.splitext(img_path)[1]
+                date_str = time.strftime('%Y%m%d')
+                new_name = f"已录入_{date_str}_{seq}{ext}"
+                new_path = os.path.join(os.path.dirname(img_path), new_name)
+                os.rename(img_path, new_path)
+                print(f"  已更名为: {new_name}")
+            except Exception as e:
+                print(f"  重命名失败: {e}")
 
     print(f"[DONE] 全部完成")
 
