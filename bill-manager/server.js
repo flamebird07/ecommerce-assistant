@@ -15,6 +15,9 @@ const COOKIES_DIR = path.join(__dirname, 'cookies');
 // 日志文件
 const LOG_FILE = path.join(WORKSPACE, 'bill.log');
 
+// 图片目录配置文件
+const DIR_CONFIG_FILE = path.join(WORKSPACE, 'dir_config.json');
+
 // 获取已保存的店铺列表
 function getShops() {
     try {
@@ -51,7 +54,17 @@ function getLogs() {
     try {
         if (fs.existsSync(LOG_FILE)) {
             const content = fs.readFileSync(LOG_FILE, 'utf8');
-            return content.split('\n').filter(line => line.trim());
+            const lines = content.split('\n').map(l => l.replace(/[\r]/g, '').trim()).filter(l => l);
+            // 只返回最近2小时的日志
+            const cutoff = Date.now() - 2 * 60 * 60 * 1000;
+            const filtered = lines.filter(line => {
+                const m = line.match(/^\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z)\]/);
+                if (!m) return true;
+                return new Date(m[1]).getTime() >= cutoff;
+            });
+            // 只返回最后500行，截断超长行
+            const recent = filtered.slice(-500);
+            return recent.map(line => line.length > 200 ? line.substring(0, 200) + '...' : line);
         }
     } catch (err) {}
     return [];
@@ -59,7 +72,9 @@ function getLogs() {
 
 function logToFile(msg) {
     const time = new Date().toISOString();
-    fs.appendFileSync(LOG_FILE, `[${time}] ${msg}\n`);
+    // 清理消息中的特殊字符
+    const clean = msg.replace(/[\r]/g, '').substring(0, 500);
+    fs.appendFileSync(LOG_FILE, `[${time}] ${clean}\n`);
 }
 
 function log(msg) {
@@ -69,14 +84,22 @@ function log(msg) {
 
 // 路由处理
 const server = http.createServer((req, res) => {
-    // 设置CORS
+    // 设置CORS和缓存控制
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
 
     if (req.method === 'OPTIONS') {
         res.writeHead(200);
         res.end();
+        return;
+    }
+
+    // 健康检查
+    if (req.url === '/ping') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('ok');
         return;
     }
 
@@ -92,6 +115,13 @@ const server = http.createServer((req, res) => {
             res.writeHead(200, { 'Content-Type': 'text/html' });
             res.end(data);
         });
+        return;
+    }
+
+    // 查询进程状态
+    if (req.url === '/get-process-status' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ running: isBillCheckRunning || isDouyinRunning }));
         return;
     }
 
@@ -135,7 +165,41 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    // 录入票据 - 使用 bill_check_fixed.py
+    // 获取图片目录配置
+    if (req.url === '/get-dir-config' && req.method === 'GET') {
+        let dir = '';
+        try {
+            if (fs.existsSync(DIR_CONFIG_FILE)) {
+                const cfg = JSON.parse(fs.readFileSync(DIR_CONFIG_FILE, 'utf-8'));
+                dir = cfg.dir || '';
+            }
+        } catch {}
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ dir }));
+        return;
+    }
+
+    // 设置图片目录配置
+    if (req.url === '/set-dir-config' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => {
+            try {
+                const { dir } = JSON.parse(body);
+                fs.writeFileSync(DIR_CONFIG_FILE, JSON.stringify({ dir: dir || '' }, null, 2));
+                log('图片目录已更新: ' + (dir || '默认'));
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true }));
+            } catch (e) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, message: e.message }));
+            }
+        });
+        return;
+    }
+
+
+    // 录入票据 - 使用 bill_image.py
     if (req.url === '/run-bill-check' && req.method === 'POST') {
         if (isBillCheckRunning) {
             res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -143,77 +207,85 @@ const server = http.createServer((req, res) => {
             return;
         }
         isBillCheckRunning = true;
-        let body = '';
-        req.on('data', chunk => body += chunk);
-        req.on('end', () => {
-            log('=== 开始录入票据 ===');
 
-            const billCheckPy = path.join(WORKSPACE, 'bill_image.py');
-            const py = spawn('python', ['-u', billCheckPy], {
-                shell: true,
-                cwd: WORKSPACE
-            });
-            currentProcess = py;
+        // 立即返回响应，不等待请求体
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, message: '已启动' }));
 
-            py.stdout.on('data', (data) => {
-                const msg = data.toString().trim();
-                if (msg) log(msg);
-            });
+        // 消费请求体（避免连接泄漏）
+        req.resume();
 
-            py.stderr.on('data', (data) => {
-                const msg = data.toString().trim();
-                // 过滤掉python warnings
-                if (msg && !msg.includes('Warning') && !msg.includes('RequestsDependencyWarning')) {
-                    log('[错误] ' + msg);
-                }
-            });
+        log('=== 开始录入票据 ===');
 
-            py.on('close', (code) => {
-                isBillCheckRunning = false;
-                currentProcess = null;
-                log('=== 录入票据结束 ===');
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({
-                    success: code === 0,
-                    message: code === 0 ? '完成' : '失败'
-                }));
-            });
+        // 读取目录配置
+        let targetDir = '';
+        try {
+            if (fs.existsSync(DIR_CONFIG_FILE)) {
+                const cfg = JSON.parse(fs.readFileSync(DIR_CONFIG_FILE, 'utf-8'));
+                targetDir = cfg.dir || '';
+            }
+        } catch {}
+
+        const billCheckPy = path.join(WORKSPACE, 'bill_image.py');
+        const pyArgs = ['-u', billCheckPy];
+        if (targetDir) pyArgs.push(targetDir);
+        const py = spawn('python', pyArgs, {
+            shell: true,
+            cwd: WORKSPACE
+        });
+        currentProcess = py;
+
+        py.stdout.on('data', (data) => {
+            const msg = data.toString().trim();
+            if (msg) log(msg);
+        });
+
+        py.stderr.on('data', (data) => {
+            const msg = data.toString().trim();
+            // 过滤掉python warnings
+            if (msg && !msg.includes('Warning') && !msg.includes('RequestsDependencyWarning')) {
+                log('[错误] ' + msg);
+            }
+        });
+
+        py.on('close', (code) => {
+            isBillCheckRunning = false;
+            currentProcess = null;
+            log('=== 录入票据结束 ===');
         });
         return;
     }
 
     // 整理票据 - 使用 arrange2.js
     if (req.url === '/run-arrange' && req.method === 'POST') {
-        let body = '';
-        req.on('data', chunk => body += chunk);
-        req.on('end', () => {
-            log('=== 开始整理票据 ===');
+        // 立即返回响应，不等待请求体
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, message: '已启动' }));
 
-            const node = spawn('node', [path.join(WORKSPACE, 'arrange2.js')], {
-                shell: true,
-                cwd: WORKSPACE
-            });
-            currentProcess = node;
+        // 消费请求体
+        req.resume();
 
-            node.stdout.on('data', (data) => {
-                const msg = data.toString().trim();
-                if (msg) log(msg);
-            });
+        log('=== 开始整理票据 ===');
 
-            node.stderr.on('data', (data) => {
-                const msg = data.toString().trim();
-                if (msg) log('[错误] ' + msg);
-            });
+        const node = spawn('node', [path.join(WORKSPACE, 'arrange2.js')], {
+            shell: true,
+            cwd: WORKSPACE
+        });
+        currentProcess = node;
 
-            node.on('close', (code) => {
-                currentProcess = null;
-                log('=== 整理票据结束 ===');
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({
-                    success: code === 0,
-                    message: code === 0 ? '完成' : '失败'
-                }));
-            });
+        node.stdout.on('data', (data) => {
+            const msg = data.toString().trim();
+            if (msg) log(msg);
+        });
+
+        node.stderr.on('data', (data) => {
+            const msg = data.toString().trim();
+            if (msg) log('[错误] ' + msg);
+        });
+
+        node.on('close', (code) => {
+            currentProcess = null;
+            log('=== 整理票据结束 ===');
         });
         return;
     }
@@ -225,9 +297,18 @@ const server = http.createServer((req, res) => {
             res.end(JSON.stringify({ success: false, message: '已有运行的进程' }));
             return;
         }
+        // 先设置运行状态，再返回响应
+        isDouyinRunning = true;
+
         // 清理旧的cookie过期标记
         const markerFile = path.join(WORKSPACE, 'cookie_expired.txt');
         if (fs.existsSync(markerFile)) { try { fs.unlinkSync(markerFile); } catch (e) {} }
+
+        // 立即返回响应，不等待请求体
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, message: '已启动' }));
+
+        // 读取请求体
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', () => {
@@ -302,30 +383,21 @@ const server = http.createServer((req, res) => {
                 isDouyinRunning = false;
                 // 检查cookie过期标记文件
                 const markerFile = path.join(WORKSPACE, 'cookie_expired.txt');
-                log(`[DEBUG] 检查标记文件: ${markerFile}, 存在=${fs.existsSync(markerFile)}`);
                 if (fs.existsSync(markerFile)) {
                     try {
                         const expiredShop = fs.readFileSync(markerFile, 'utf-8').trim();
                         fs.unlinkSync(markerFile);
-                        log(`[DEBUG] 标记文件内容: "${expiredShop}"`);
                         if (expiredShop) {
                             const safeName = expiredShop.replace(/[\\/:*?"<>|]/g, '_');
                             const cookieFile = path.join(COOKIES_DIR, safeName + '.json');
                             if (fs.existsSync(cookieFile)) {
                                 fs.unlinkSync(cookieFile);
                                 log(`Cookie已过期，自动删除店铺: ${expiredShop}`);
-                            } else {
-                                log(`[DEBUG] cookie文件不存在: ${cookieFile}`);
                             }
                         }
-                    } catch (e) { log(`[DEBUG] 标记文件处理异常: ${e.message}`); }
+                    } catch (e) { log(`标记文件处理异常: ${e.message}`); }
                 }
                 log('=== 抖店商品信息获取结束 ===');
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({
-                    success: code === 0,
-                    message: code === 0 ? '完成' : '失败'
-                }));
             });
         });
         return;
@@ -504,7 +576,7 @@ const server = http.createServer((req, res) => {
 
     // 获取日志
     if (req.url === '/get-logs' && req.method === 'GET') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ logs: getLogs() }));
         return;
     }

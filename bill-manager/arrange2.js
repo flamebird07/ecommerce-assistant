@@ -551,7 +551,7 @@ function extractGoodsCost(text, shopAbbr) {
 
         if (dataStarted) {
             // 跳过非数据行关键词
-            const skipKeywords = ['序号', '客户', '电话', '地址', '经办人', '店员', '批次', '日期', '总额', '销数', '退数', '微信', '支付宝', '银行', '账号', '农行', '交行', '手机', '提醒', '版本', '入库', 'QR', '扫码', '发生日期', '类型', '本次核销', '上次结余', '本单结余', '累计结余', '本单额', '本单余', '累计余', '抵扣', '欠款', '总数', '实付', '应收', '开单', '退货'];
+            const skipKeywords = ['序号', '客户', '电话', '地址', '经办人', '店员', '批次', '日期', '总额', '销数', '退数', '微信', '支付宝', '银行', '账号', '农行', '交行', '手机', '提醒', '版本', '入库', 'QR', '扫码', '发生日期', '类型', '本次核销', '上次结余', '本单结余', '累计结余', '本单额', '本单余', '累计余', '抵扣', '欠款', '总数', '实付', '应收', '开单', '退货', '数量', '款数', '数量:', '款数:'];
             if (skipKeywords.some(k => line.includes(k))) continue;
 
             const parts = line.split(/[\s|]+/).filter(p => p.trim());
@@ -593,7 +593,7 @@ function extractGoodsCost(text, shopAbbr) {
             const canUsePriceCol = priceColIndex >= 0 && priceColIndex > codeColIndex && priceColIndex < parts.length
                 && (!headerHasSubtotal || headerColCount === parts.length);
             if (canUsePriceCol && parts[priceColIndex]) {
-                const rawPrice = parts[priceColIndex].replace(/[,，]/g, '');
+                const rawPrice = parts[priceColIndex].replace(/[,，]/g, '').replace(/元$/g, '');
                 if (/^-?[\d.]+$/.test(rawPrice)) {
                     const v = parseFloat(rawPrice);
                     if (!isNaN(v) && v > 0) unitPrice = v;
@@ -605,14 +605,14 @@ function extractGoodsCost(text, shopAbbr) {
                 const scanStart = Math.max(codeColIndex + 1, parts.length - 2);
                 for (let pi = scanStart; pi >= codeColIndex + 1; pi--) {
                     if (pi >= parts.length) continue;
-                    const raw = parts[pi].replace(/[,，]/g, '');
+                    const raw = parts[pi].replace(/[,，]/g, '').replace(/元$/g, '');
                     if (!/^-?[\d.]+$/.test(raw)) continue;
                     const v = parseFloat(raw);
                     if (!isNaN(v) && v > 0) { unitPrice = v; break; }
                 }
                 if (unitPrice <= 0 && parts.length > 1) {
                     for (let pi = parts.length - 1; pi >= 0; pi--) {
-                        const raw = parts[pi].replace(/[,，]/g, '');
+                        const raw = parts[pi].replace(/[,，]/g, '').replace(/元$/g, '');
                         if (!/^-?[\d.]+$/.test(raw)) continue;
                         const v = parseFloat(raw);
                         if (!isNaN(v) && v > 0) { unitPrice = v; break; }
@@ -682,7 +682,7 @@ async function syncToTbl4(srcRecord, srcTime) {
         } else if (rawSs && typeof rawSs === 'string' && rawSs.length > 20) {
             screenshots = [{ file_token: rawSs, name: '单据截图.jpg' }];
         }
-        if (code && cost != null) tbl4Map.set(code + '|' + shop, { id: r.id, cost: Number(cost), note, shop, screenshots });
+        if (code && cost != null) tbl4Map.set(code.trim() + '|' + shop.trim(), { id: r.id, cost: Number(cost), note, shop: shop.trim(), screenshots });
     }
     console.log(`  [4号] 已有商品: ${tbl4Map.size}个`);
 
@@ -699,12 +699,13 @@ async function syncToTbl4(srcRecord, srcTime) {
     }
 
     let added = 0;
+    const shopNameTrim = shopName.trim();
     for (const g of goods) {
-        const existing = tbl4Map.get(g.code + '|' + shopName);
+        const existing = tbl4Map.get(g.code.trim() + '|' + shopNameTrim);
         if (!existing) {
             const fields = {
-                '款号': g.code,
-                '档口': shopName,
+                '款号': g.code.trim(),
+                '档口': shopNameTrim,
                 '成本': g.cost,
                 '记录时间': recordTimeStr,
                 '单据内容': content || null
@@ -877,6 +878,49 @@ async function main() {
             await sleep(100);
         }
     }
+
+    // ========== 第1.5步：4号表格去重（款号+档口相同则保留记录时间最新） ==========
+    console.log('\n[DEDUP-TBL4] 4号表格去重...');
+    let tbl4AllDedup = [], tbl4PtDedup = '', tbl4Retries = 3;
+    while (true) {
+        const list = await listRecords(TBL4, 100, tbl4PtDedup);
+        if (list.error) { await sleep(2000); tbl4Retries--; if (tbl4Retries <= 0) break; continue; }
+        if (list.data && list.data.items) tbl4AllDedup.push(...list.data.items);
+        if (!list.data.has_more) break;
+        tbl4PtDedup = list.data.page_token;
+        await sleep(500);
+    }
+
+    const tbl4DedupMap = new Map();
+    for (const r of tbl4AllDedup) {
+        const code = getText(r.fields['款号']).trim();
+        const shop = getText(r.fields['档口']).trim();
+        if (!code || !shop) continue;
+        const key = code + '|' + shop;
+        const curTime = r.fields['记录时间'] || 0;
+        const existing = tbl4DedupMap.get(key);
+        if (!existing || curTime > existing.time) {
+            tbl4DedupMap.set(key, { record: r, time: curTime });
+        }
+    }
+
+    const tbl4LatestIds = new Set([...tbl4DedupMap.values()].map(v => v.record.id));
+    const tbl4ToDelete = tbl4AllDedup.filter(r => !tbl4LatestIds.has(r.id));
+
+    console.log(`4号去重: 共 ${tbl4AllDedup.length} 条, 最新记录 ${tbl4LatestIds.size} 条, 待删除 ${tbl4ToDelete.length} 条`);
+
+    let tbl4Deleted = 0;
+    for (const r of tbl4ToDelete) {
+        const del = await deleteRecord(TBL4, r.id);
+        if (del.code === 0 || (del.error && del.error.code === 1244001)) {
+            tbl4Deleted++;
+            console.log(`  删除 ${getText(r.fields['款号'])} ${getText(r.fields['档口'])}`);
+        } else {
+            console.log(`  删除失败 ${getText(r.fields['款号'])}: ${del.msg || del.error?.msg}`);
+        }
+        await sleep(500);
+    }
+    console.log(`4号去重完成: 删除 ${tbl4Deleted} 条`);
 
     // ========== 第2步：2号表格去重（档口名称+批次号相同则保留单据打印时间最新） ==========
     console.log('\n[DEDUP-TBL2] 2号表格去重...');

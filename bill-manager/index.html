@@ -5,8 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>票据管理</title>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
         body {
@@ -394,6 +392,27 @@
                     <button class="btn btn-primary" id="btn录入" onclick="runBillCheck()">录入票据</button>
                     <button class="btn btn-success" id="btn整理" onclick="runArrange()">整理票据</button>
                     <button class="btn btn-danger" id="btn停止" onclick="stopProcess()" disabled>停止</button>
+                    <button class="btn btn-warning" onclick="openDirConfig()" style="margin-left:auto;">⚙ 设置</button>
+                </div>
+                <div class="form-row" style="margin-top:8px;">
+                    <span class="form-label">图片目录</span>
+                    <span id="currentDir" style="font-size:13px;color:#888;">加载中...</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 目录配置对话框 -->
+        <div id="dirModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;">
+            <div style="background:#fff;border-radius:12px;padding:24px 28px;width:480px;max-width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.2);">
+                <h3 style="margin:0 0 16px;font-size:16px;font-weight:600;">图片处理目录设置</h3>
+                <div class="form-row" style="margin:0;">
+                    <span class="form-label">目录路径</span>
+                    <input type="text" id="dirInput" class="form-input" placeholder="C:\Users\Administrator\Desktop\票据视频" style="flex:1;">
+                </div>
+                <p style="font-size:12px;color:#999;margin:8px 0 0;">票据图片扫描的目录路径，支持绝对路径</p>
+                <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:20px;">
+                    <button class="btn" onclick="closeDirConfig()" style="background:#eee;color:#666;">取消</button>
+                    <button class="btn btn-primary" onclick="saveDirConfig()">保存</button>
                 </div>
             </div>
         </div>
@@ -469,9 +488,172 @@
     </div>
 
     <script>
-        let isRunning = false;
-        let logInterval = null;
+        // ========== 全局状态 ==========
+        let isBillRunning = false;    // 票据录入/整理
+        let isDouyinRunning = false;  // 抖店商品获取
+        let statusPolling = null;
+        let selectedShop = '';
+        let dropdownOpen = false;
+        let shopsData = [];
+        let autoRunning = false;
+        let autoShopConfigs = [];
 
+        // ========== 工具函数 ==========
+        function fetchWithTimeout(url, opts = {}, ms = 5000) {
+            const c = new AbortController();
+            const t = setTimeout(() => c.abort(), ms);
+            return fetch(url, { ...opts, signal: c.signal }).finally(() => clearTimeout(t));
+        }
+
+        // 日志追加
+        function log(message, type = '') {
+            const el = document.getElementById('status');
+            if (!el) return;
+            const time = new Date().toLocaleTimeString();
+            const cls = type ? ` class="${type}"` : '';
+            el.insertAdjacentHTML('beforeend', `<span${cls}>[${time}] ${message}</span>\n`);
+            el.parentElement.scrollTop = el.parentElement.scrollHeight;
+        }
+
+        // ========== 状态轮询 ==========
+        function startStatusPolling() {
+            if (statusPolling) return; // 已有轮询则不重复启动
+            let lastLogSize = 0;
+            statusPolling = setInterval(async () => {
+                try {
+                    // 拉日志
+                    const lr = await fetchWithTimeout('/get-logs');
+                    const ld = await lr.json();
+                    if (ld.logs && ld.logs.length > lastLogSize) {
+                        const newLogs = ld.logs.slice(lastLogSize);
+                        newLogs.forEach(msg => {
+                            if (msg.includes('[错误]') || msg.includes('失败')) log(msg, 'error');
+                            else if (msg.includes('完成') || msg.includes('成功')) log(msg, 'success');
+                            else if (msg.includes('##') || msg.includes('商品ID')) log(msg, 'product');
+                            else if (msg.includes('>>') || msg.includes('开始')) log(msg, 'info');
+                            else log(msg);
+                            if (msg.includes('Cookie已过期，自动删除店铺')) {
+                                const m = msg.match(/自动删除店铺:\s*(.+)/);
+                                if (m) { if (selectedShop === m[1].trim()) selectShop(''); loadShops(); }
+                            }
+                        });
+                        lastLogSize = ld.logs.length;
+                    }
+                    // 拉进程状态
+                    const sr = await fetchWithTimeout('/get-process-status');
+                    const sd = await sr.json();
+                    if (!sd.running) {
+                        if (isBillRunning) { isBillRunning = false; setBillButtons(false); }
+                        if (isDouyinRunning) { isDouyinRunning = false; setDouyinButtons(false); }
+                        if (!isBillRunning && !isDouyinRunning) stopStatusPolling();
+                    }
+                } catch {}
+            }, 2000);
+        }
+
+        function stopStatusPolling() {
+            if (statusPolling) { clearInterval(statusPolling); statusPolling = null; }
+        }
+
+        // ========== 按钮状态（分组控制） ==========
+        function setBillButtons(running) {
+            ['btn录入', 'btn整理'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.disabled = running;
+            });
+            updateStopButton();
+        }
+
+        function setDouyinButtons(running) {
+            ['btn单次获取', 'btn多次执行', 'btn登录'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.disabled = running;
+            });
+            const trigger = document.getElementById('dropdownTrigger');
+            if (trigger) {
+                if (running) { trigger.classList.add('disabled'); trigger.style.cursor = 'not-allowed'; trigger.style.background = '#f5f5f5'; }
+                else { trigger.classList.remove('disabled'); trigger.style.cursor = 'pointer'; trigger.style.background = 'white'; }
+            }
+            updateStopButton();
+        }
+
+        function updateStopButton() {
+            document.getElementById('btn停止').disabled = !(isBillRunning || isDouyinRunning);
+        }
+
+        // ========== 启动任务 ==========
+        async function startBillTask(url, body, logMsg) {
+            if (isBillRunning) return;
+            isBillRunning = true;
+            setBillButtons(true);
+            log(logMsg, 'info');
+            startStatusPolling();
+            try {
+                const opts = body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : { method: 'POST' };
+                const res = await fetchWithTimeout(url, opts);
+                const r = await res.json();
+                if (!r.success) { log('启动失败: ' + r.message, 'error'); isBillRunning = false; setBillButtons(false); }
+            } catch (e) { log('请求失败: ' + e.message, 'error'); isBillRunning = false; setBillButtons(false); }
+        }
+
+        async function startDouyinTask(url, body, logMsg) {
+            if (isDouyinRunning) return;
+            isDouyinRunning = true;
+            setDouyinButtons(true);
+            log(logMsg, 'info');
+            startStatusPolling();
+            try {
+                const opts = body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : { method: 'POST' };
+                const res = await fetchWithTimeout(url, opts);
+                const r = await res.json();
+                if (!r.success) { log('启动失败: ' + r.message, 'error'); isDouyinRunning = false; setDouyinButtons(false); }
+            } catch (e) { log('请求失败: ' + e.message, 'error'); isDouyinRunning = false; setDouyinButtons(false); }
+        }
+
+        function runBillCheck() { startBillTask('/run-bill-check', null, '开始录入票据...'); }
+        function runArrange() { startBillTask('/run-arrange', null, '开始整理票据...'); }
+        function runDouyinAnalyzer() {
+            if (!selectedShop) { log('请先选择店铺或登录新账号', 'warning'); return; }
+            const tc = parseInt(document.getElementById('targetCount').value) || 1;
+            const sf = parseFloat(document.getElementById('shippingFee').value) || 2.1;
+            const ins = parseFloat(document.getElementById('insurance').value) || 4.01;
+            startDouyinTask('/run-douyin-analyzer', { targetCount: tc, shopName: selectedShop, shippingFee: sf, insurance: ins }, `开始获取抖店商品 [${selectedShop}] (目标${tc}个)...`);
+        }
+
+        async function stopProcess() {
+            log('正在停止...', 'warning');
+            try {
+                const res = await fetchWithTimeout('/stop-process', { method: 'POST' });
+                const r = await res.json();
+                log(r.success ? '已停止进程' : '停止失败: ' + r.message, r.success ? 'success' : 'error');
+            } catch (e) { log('停止请求失败: ' + e.message, 'error'); }
+            isBillRunning = false; setBillButtons(false);
+            isDouyinRunning = false; setDouyinButtons(false);
+            stopStatusPolling();
+        }
+
+        // ========== 目录配置 ==========
+        async function loadDirConfig() {
+            try {
+                const res = await fetchWithTimeout('/get-dir-config');
+                const data = await res.json();
+                document.getElementById('currentDir').textContent = data.dir || '未设置';
+                document.getElementById('dirInput').value = data.dir || '';
+            } catch { document.getElementById('currentDir').textContent = '未设置'; }
+        }
+        function openDirConfig() { document.getElementById('dirModal').style.display = 'flex'; }
+        function closeDirConfig() { document.getElementById('dirModal').style.display = 'none'; }
+        async function saveDirConfig() {
+            const dir = document.getElementById('dirInput').value.trim();
+            try {
+                const res = await fetchWithTimeout('/set-dir-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dir }) });
+                const data = await res.json();
+                if (data.success) { document.getElementById('currentDir').textContent = dir || '未设置'; closeDirConfig(); log('图片目录已更新: ' + (dir || '默认'), 'success'); }
+                else log('保存失败: ' + data.message, 'error');
+            } catch (e) { log('保存失败: ' + e.message, 'error'); }
+        }
+
+        // ========== Tab切换 ==========
         function switchTab(tabName, btn) {
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
@@ -479,101 +661,35 @@
             document.getElementById('tab-' + tabName).classList.add('active');
         }
 
-        function log(message, type = '') {
-            const status = document.getElementById('status');
-            const time = new Date().toLocaleTimeString();
-            const cls = type ? ` class="${type}"` : '';
-            status.innerHTML += `<span${cls}>[${time}] ${message}</span>\n`;
-            status.parentElement.scrollTop = status.parentElement.scrollHeight;
-        }
-
-        function startLogPolling() {
-            let lastSize = 0;
-            logInterval = setInterval(async () => {
-                try {
-                    const response = await fetch('/get-logs');
-                    const data = await response.json();
-                    if (data.logs && data.logs.length > 0) {
-                        const newLogs = data.logs.slice(lastSize);
-                        newLogs.forEach(msg => {
-                            if (msg.includes('[错误]') || msg.includes('失败')) log(msg, 'error');
-                            else if (msg.includes('完成') || msg.includes('成功')) log(msg, 'success');
-                            else if (msg.includes('##') || msg.includes('商品ID')) log(msg, 'product');
-                            else if (msg.includes('>>')) log(msg, 'info');
-                            else if (msg.includes('开始')) log(msg, 'info');
-                            else log(msg);
-
-                            if (msg.includes('Cookie已过期，自动删除店铺')) {
-                                const m = msg.match(/自动删除店铺:\s*(.+)/);
-                                if (m) {
-                                    const expired = m[1].trim();
-                                    if (selectedShop === expired) selectShop('');
-                                    log(`店铺 "${expired}" Cookie已过期，已从列表移除`, 'warning');
-                                }
-                                loadShops();
-                            }
-                        });
-                        lastSize = data.logs.length;
-                    }
-                } catch (err) {}
-            }, 1000);
-        }
-
-        function stopLogPolling() {
-            if (logInterval) { clearInterval(logInterval); logInterval = null; }
-        }
-
-        let selectedShop = '';
-        let dropdownOpen = false;
-
+        // ========== 店铺管理 ==========
         function toggleDropdown() {
             if (document.getElementById('dropdownTrigger').classList.contains('disabled')) return;
             dropdownOpen = !dropdownOpen;
             document.getElementById('dropdownMenu').classList.toggle('open', dropdownOpen);
             document.getElementById('dropdownTrigger').classList.toggle('open', dropdownOpen);
         }
-
-        function closeDropdown() {
-            dropdownOpen = false;
-            document.getElementById('dropdownMenu').classList.remove('open');
-            document.getElementById('dropdownTrigger').classList.remove('open');
-        }
-
+        function closeDropdown() { dropdownOpen = false; document.getElementById('dropdownMenu').classList.remove('open'); document.getElementById('dropdownTrigger').classList.remove('open'); }
         function selectShop(shop) {
             selectedShop = shop;
             const el = document.getElementById('selectedShopText');
             if (shop) { el.textContent = shop; el.classList.remove('dropdown-placeholder'); }
             else { el.textContent = '请先登录账号'; el.classList.add('dropdown-placeholder'); }
-            closeDropdown();
-            renderDropdownItems();
+            closeDropdown(); renderDropdownItems();
         }
-
         async function deleteShop(event, shop) {
             event.stopPropagation();
             if (!confirm(`确定要删除店铺"${shop}"吗？`)) return;
             try {
-                const res = await fetch('/remove-shop', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ shopName: shop })
-                });
+                const res = await fetchWithTimeout('/remove-shop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ shopName: shop }) });
                 const r = await res.json();
-                if (r.success) {
-                    log('已删除店铺: ' + shop, 'success');
-                    if (selectedShop === shop) selectShop('');
-                    await loadShops();
-                } else { log('删除店铺失败', 'error'); }
+                if (r.success) { log('已删除店铺: ' + shop, 'success'); if (selectedShop === shop) selectShop(''); loadShops(); }
+                else log('删除店铺失败', 'error');
             } catch (e) { log('删除请求失败: ' + e.message, 'error'); }
         }
-
-        let shopsData = [];
-
         function renderDropdownItems() {
             const menu = document.getElementById('dropdownMenu');
             menu.innerHTML = '';
-            if (shopsData.length === 0) {
-                menu.innerHTML = '<div class="dropdown-item"><span class="item-text" style="color:#bbb;">请先登录账号</span></div>';
-                return;
-            }
+            if (shopsData.length === 0) { menu.innerHTML = '<div class="dropdown-item"><span class="item-text" style="color:#bbb;">请先登录账号</span></div>'; return; }
             shopsData.forEach(shop => {
                 const item = document.createElement('div');
                 item.className = 'dropdown-item' + (shop === selectedShop ? ' selected' : '');
@@ -583,191 +699,86 @@
                 menu.appendChild(item);
             });
         }
-
-        function setButtonsState(running) {
-            ['btn录入', 'btn整理', 'btn单次获取', 'btn多次执行', 'btn登录'].forEach(id => {
-                const el = document.getElementById(id);
-                if (el) el.disabled = running;
-            });
-            document.getElementById('btn停止').disabled = !running;
-            const trigger = document.getElementById('dropdownTrigger');
-            if (running) {
-                trigger.classList.add('disabled');
-                trigger.style.cursor = 'not-allowed';
-                trigger.style.background = '#f5f5f5';
-            } else {
-                trigger.classList.remove('disabled');
-                trigger.style.cursor = 'pointer';
-                trigger.style.background = 'white';
-            }
-        }
-
         async function loadShops() {
             try {
-                const res = await fetch('/get-shops');
+                const res = await fetchWithTimeout('/get-shops');
                 const data = await res.json();
                 shopsData = data.shops || [];
-                renderDropdownItems();
-                renderAutoShopList();
-            } catch (e) { console.error('加载店铺列表失败:', e); }
+                renderDropdownItems(); renderAutoShopList();
+            } catch {}
         }
-
         async function loginNewShop() {
-            if (isRunning) return;
-            isRunning = true; setButtonsState(true);
+            if (isDouyinRunning) return;
+            isDouyinRunning = true; setDouyinButtons(true);
             log('开始登录新店铺，请在弹出的浏览器中扫码登录...', 'info');
-            startLogPolling();
+            startStatusPolling();
             try {
-                const res = await fetch('/login-new-shop', { method: 'POST' });
+                const res = await fetchWithTimeout('/login-new-shop', { method: 'POST' }, 120000);
                 const r = await res.json();
                 if (r.success) { log('登录成功: ' + r.shopName, 'success'); await loadShops(); selectShop(r.shopName); }
-                else { log('登录失败: ' + r.message, 'error'); }
+                else log('登录失败: ' + r.message, 'error');
             } catch (e) { log('登录请求失败: ' + e.message, 'error'); }
-            stopLogPolling(); isRunning = false; setButtonsState(false);
+            isDouyinRunning = false; setDouyinButtons(false);
         }
+        document.addEventListener('click', (e) => { const dd = document.getElementById('shopDropdown'); if (dd && !dd.contains(e.target)) closeDropdown(); });
 
-        async function runBillCheck() {
-            if (isRunning) return;
-            isRunning = true; setButtonsState(true);
-            log('开始录入票据...', 'info'); startLogPolling();
-            try {
-                const res = await fetch('/run-bill-check', { method: 'POST' });
-                const r = await res.json();
-                log(r.success ? '票据录入完成' : '票据录入失败: ' + r.message, r.success ? 'success' : 'error');
-            } catch (e) { log('请求失败: ' + e.message, 'error'); }
-            stopLogPolling(); isRunning = false; setButtonsState(false);
-        }
-
-        async function runArrange() {
-            if (isRunning) return;
-            isRunning = true; setButtonsState(true);
-            log('开始整理票据...', 'info'); startLogPolling();
-            try {
-                const res = await fetch('/run-arrange', { method: 'POST' });
-                const r = await res.json();
-                log(r.success ? '票据整理完成' : '票据整理失败: ' + r.message, r.success ? 'success' : 'error');
-            } catch (e) { log('请求失败: ' + e.message, 'error'); }
-            stopLogPolling(); isRunning = false; setButtonsState(false);
-        }
-
-        async function runDouyinAnalyzer() {
-            if (isRunning) return;
-            if (!selectedShop) { log('请先选择店铺或登录新账号', 'warning'); return; }
-            const targetCount = parseInt(document.getElementById('targetCount').value) || 1;
-            const shippingFee = parseFloat(document.getElementById('shippingFee').value) || 2.1;
-            const insurance = parseFloat(document.getElementById('insurance').value) || 4.01;
-            isRunning = true; setButtonsState(true);
-            log(`开始获取抖店商品信息 [${selectedShop}] (目标: ${targetCount}个)...`, 'info');
-            startLogPolling();
-            try {
-                const res = await fetch('/run-douyin-analyzer', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ targetCount, shopName: selectedShop, shippingFee, insurance })
-                });
-                const r = await res.json();
-                log(r.success ? '抖店商品信息获取完成' : '获取失败: ' + r.message, r.success ? 'success' : 'error');
-            } catch (e) { log('请求失败: ' + e.message, 'error'); }
-            stopLogPolling(); isRunning = false; setButtonsState(false);
-        }
-
+        // ========== 抖店多次执行 ==========
         async function runDouyinMulti() {
-            if (isRunning) return;
+            if (isDouyinRunning) return;
             if (!selectedShop) { log('请先选择店铺或登录新账号', 'warning'); return; }
-            const targetCount = parseInt(document.getElementById('targetCount').value) || 1;
-            const intervalMinutes = parseInt(document.getElementById('intervalMinutes').value) || 30;
-            const shippingFee = parseFloat(document.getElementById('shippingFee').value) || 2.1;
-            const insurance = parseFloat(document.getElementById('insurance').value) || 4.01;
-            isRunning = true; setButtonsState(true);
-            log(`开始多次获取 [${selectedShop}] (目标: ${targetCount}个, 间隔: ${intervalMinutes}分钟)...`, 'info');
-            startLogPolling();
+            const tc = parseInt(document.getElementById('targetCount').value) || 1;
+            const im = parseInt(document.getElementById('intervalMinutes').value) || 30;
+            const sf = parseFloat(document.getElementById('shippingFee').value) || 2.1;
+            const ins = parseFloat(document.getElementById('insurance').value) || 4.01;
+            isDouyinRunning = true; setDouyinButtons(true);
+            log(`开始多次获取 [${selectedShop}] (目标${tc}个, 间隔${im}分钟)...`, 'info');
+            startStatusPolling();
             try {
-                const res = await fetch('/run-douyin-multi', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ targetCount, intervalMinutes, shopName: selectedShop, shippingFee, insurance })
-                });
+                const res = await fetchWithTimeout('/run-douyin-multi', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ targetCount: tc, intervalMinutes: im, shopName: selectedShop, shippingFee: sf, insurance: ins }) }, 3600000);
                 const r = await res.json();
                 log(r.success ? '多次执行完成' : '执行失败: ' + r.message, r.success ? 'success' : 'error');
             } catch (e) { log('请求失败: ' + e.message, 'error'); }
-            stopLogPolling(); isRunning = false; setButtonsState(false);
+            isDouyinRunning = false; setDouyinButtons(false);
         }
-
-        async function stopProcess() {
-            if (!isRunning) return;
-            log('正在停止...', 'warning');
-            try {
-                const res = await fetch('/stop-process', { method: 'POST' });
-                const r = await res.json();
-                log(r.success ? '已停止进程' : '停止失败: ' + r.message, r.success ? 'success' : 'error');
-            } catch (e) { log('停止请求失败: ' + e.message, 'error'); }
-            stopLogPolling(); isRunning = false; setButtonsState(false);
-        }
-
-        document.addEventListener('click', (e) => {
-            const dd = document.getElementById('shopDropdown');
-            if (dd && !dd.contains(e.target)) closeDropdown();
-        });
 
         // ========== 自动化处理 ==========
-        let autoRunning = false;
-        let autoShopConfigs = [];
-
         function renderAutoShopList() {
             const container = document.getElementById('autoShopList');
             container.innerHTML = '';
-            if (shopsData.length === 0) {
-                container.innerHTML = '<span style="color:#999;font-size:14px;">暂无店铺，请先登录账号</span>';
-                return;
-            }
-            if (autoShopConfigs.length === 0) {
-                autoShopConfigs = shopsData.map(s => ({ shopName: s, targetCount: 3 }));
-            } else {
+            if (shopsData.length === 0) { container.innerHTML = '<span style="color:#999;font-size:14px;">暂无店铺，请先登录账号</span>'; return; }
+            if (autoShopConfigs.length === 0) autoShopConfigs = shopsData.map(s => ({ shopName: s, targetCount: 3 }));
+            else {
                 autoShopConfigs = autoShopConfigs.filter(c => shopsData.includes(c.shopName));
                 shopsData.forEach(s => { if (!autoShopConfigs.find(c => c.shopName === s)) autoShopConfigs.push({ shopName: s, targetCount: 3 }); });
             }
-
             let html = '<table class="auto-table"><thead><tr><th>店铺名称</th><th style="width:100px;text-align:center;">每日抓取</th><th style="width:90px;text-align:center;">顺序</th><th style="width:70px;text-align:center;">操作</th></tr></thead><tbody>';
             autoShopConfigs.forEach((c, i) => {
-                const upD = i === 0 ? 'disabled' : '';
-                const dnD = i === autoShopConfigs.length - 1 ? 'disabled' : '';
-                html += `<tr>
-                    <td>${c.shopName}</td>
-                    <td style="text-align:center;"><input type="number" class="auto-target-count" data-shop="${c.shopName}" value="${c.targetCount}" min="1" class="form-input form-input-sm" style="width:60px;padding:5px 8px;font-size:13px;border:1px solid #d9d9d9;border-radius:6px;text-align:center;"></td>
-                    <td style="text-align:center;">
-                        <button class="btn-order" onclick="moveAutoShopUp(${i})" ${upD}>&uarr;</button>
-                        <button class="btn-order" onclick="moveAutoShopDown(${i})" ${dnD}>&darr;</button>
-                    </td>
-                    <td style="text-align:center;"><button class="btn-remove" onclick="removeAutoShop('${c.shopName}')">删除</button></td>
-                </tr>`;
+                html += `<tr><td>${c.shopName}</td><td style="text-align:center;"><input type="number" class="auto-target-count" data-shop="${c.shopName}" value="${c.targetCount}" min="1" style="width:60px;padding:5px 8px;font-size:13px;border:1px solid #d9d9d9;border-radius:6px;text-align:center;"></td><td style="text-align:center;"><button class="btn-order" onclick="moveAutoShopUp(${i})" ${i===0?'disabled':''}>&uarr;</button> <button class="btn-order" onclick="moveAutoShopDown(${i})" ${i===autoShopConfigs.length-1?'disabled':''}>&darr;</button></td><td style="text-align:center;"><button class="btn-remove" onclick="removeAutoShop('${c.shopName}')">删除</button></td></tr>`;
             });
             html += '</tbody></table>';
             container.innerHTML = html;
         }
-
         function removeAutoShop(name) { autoShopConfigs = autoShopConfigs.filter(c => c.shopName !== name); renderAutoShopList(); }
         function moveAutoShopUp(i) { if (i <= 0) return; [autoShopConfigs[i], autoShopConfigs[i-1]] = [autoShopConfigs[i-1], autoShopConfigs[i]]; renderAutoShopList(); }
         function moveAutoShopDown(i) { if (i >= autoShopConfigs.length - 1) return; [autoShopConfigs[i], autoShopConfigs[i+1]] = [autoShopConfigs[i+1], autoShopConfigs[i]]; renderAutoShopList(); }
-
         async function startAutoProcess() {
             if (autoRunning) return;
             if (shopsData.length === 0) { log('没有可执行的店铺', 'warning'); return; }
             const inputs = document.querySelectorAll('.auto-target-count');
             autoShopConfigs = [];
-            inputs.forEach(inp => { autoShopConfigs.push({ shopName: inp.dataset.shop, targetCount: parseInt(inp.value) || 1 }); });
+            inputs.forEach(inp => autoShopConfigs.push({ shopName: inp.dataset.shop, targetCount: parseInt(inp.value) || 1 }));
             if (autoShopConfigs.length === 0) { log('没有可执行的店铺', 'warning'); return; }
             const interval = parseInt(document.getElementById('autoIntervalMinutes').value) || 60;
             log(`启动自动化，共${autoShopConfigs.length}个店铺，间隔${interval}分钟`, 'info');
             autoRunning = true;
             document.getElementById('btnAutoStart').disabled = true;
             document.getElementById('btnAutoStop').disabled = false;
-            startLogPolling();
             await runAutoRound();
-            stopLogPolling();
             if (autoRunning) log('[自动化] 本轮执行完毕', 'info');
             autoRunning = false;
             document.getElementById('btnAutoStart').disabled = false;
             document.getElementById('btnAutoStop').disabled = true;
         }
-
         async function runAutoRound() {
             if (!autoRunning) return;
             const batch = parseInt(document.getElementById('autoTargetCount').value) || 3;
@@ -778,30 +789,20 @@
                 let processed = 0;
                 while (processed < c.targetCount && autoRunning) {
                     const thisBatch = Math.min(batch, c.targetCount - processed);
-                    log(`[自动化] ${c.shopName}: 处理 ${processed + 1}-${processed + thisBatch} / ${c.targetCount}`, 'info');
+                    log(`[自动化] ${c.shopName}: 处理 ${processed+1}-${processed+thisBatch} / ${c.targetCount}`, 'info');
                     const sf = parseFloat(document.getElementById('shippingFee').value) || 2.1;
                     const ins = parseFloat(document.getElementById('insurance').value) || 4.01;
                     try {
-                        const res = await fetch('/run-douyin-analyzer', {
-                            method: 'POST', headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ targetCount: thisBatch, shopName: c.shopName, shippingFee: sf, insurance: ins })
-                        });
+                        const res = await fetchWithTimeout('/run-douyin-analyzer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ targetCount: thisBatch, shopName: c.shopName, shippingFee: sf, insurance: ins }) });
                         const r = await res.json();
-                        log(r.success ? `[自动化] ${c.shopName}: ${processed + thisBatch}/${c.targetCount} 完成` : `[自动化] ${c.shopName}: 失败: ${r.message}`, r.success ? 'success' : 'error');
+                        log(r.success ? `[自动化] ${c.shopName}: ${processed+thisBatch}/${c.targetCount} 完成` : `[自动化] ${c.shopName}: 失败: ${r.message}`, r.success ? 'success' : 'error');
                     } catch (e) { log(`[自动化] ${c.shopName}: 请求失败: ${e.message}`, 'error'); }
                     processed += thisBatch;
-                    if (processed < c.targetCount && autoRunning) {
-                        log(`[自动化] ${c.shopName}: 等待${interval}分钟...`, 'info');
-                        await new Promise(r => setTimeout(r, interval * 60000));
-                    }
+                    if (processed < c.targetCount && autoRunning) { log(`[自动化] ${c.shopName}: 等待${interval}分钟...`, 'info'); await new Promise(r => setTimeout(r, interval * 60000)); }
                 }
-                if (autoRunning && i < autoShopConfigs.length - 1) {
-                    log(`[自动化] 切换下一个店铺，等待${interval}分钟...`, 'info');
-                    await new Promise(r => setTimeout(r, interval * 60000));
-                }
+                if (autoRunning && i < autoShopConfigs.length - 1) { log(`[自动化] 切换下一个店铺，等待${interval}分钟...`, 'info'); await new Promise(r => setTimeout(r, interval * 60000)); }
             }
         }
-
         function stopAutoProcess() {
             if (!autoRunning) return;
             log('正在停止自动化...', 'warning');
@@ -811,6 +812,8 @@
             log('自动化已停止', 'success');
         }
 
+        // ========== 初始化 ==========
+        loadDirConfig();
         loadShops();
     </script>
 </body>

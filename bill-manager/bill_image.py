@@ -88,6 +88,7 @@ def parse_shop_name(text):
     for line in text.split('\n'):
         s = line.strip().replace('客户联','').replace('存根联','').strip()
         s = re.sub(r'^```[a-zA-Z]*', '', s).strip()  # 去掉 Markdown 代码块前缀
+        s = re.sub(r'^#+\s*', '', s).strip()  # 去掉 Markdown 标题前缀
         if not s or s=='```' or s in ('销售明细','销售/退货明细','销售单','退货单','销售退货单'): continue
         # 跳过UI元素和无关行
         if re.match(r'^[<🔔]', s): continue
@@ -122,6 +123,7 @@ def parse_shop_name(text):
         for line in lines:
             s = line.strip().replace('客户联','').replace('存根联','').strip()
             s = re.sub(r'^```[a-zA-Z]*', '', s).strip()
+            s = re.sub(r'^#+\s*', '', s).strip()  # 去掉 Markdown 标题前缀
             s = re.sub(r'[（()）【】\[\]]+', '', s)  # 去掉括号
             s = re.sub(r'\s*(?:销售退货单|退货单|销售单|收款单)\s*$', '', s).strip()  # 去掉销售单后缀
             s = re.sub(r'\s*(?:客户联|存根联)\s*$', '', s).strip()
@@ -238,17 +240,6 @@ def main():
     for i, img_path in enumerate(files):
         seq = f"{i+1:03d}"
         ok = process_image(img_path, record_time_ms, seq)
-        # 录入成功后重命名图片
-        if ok:
-            try:
-                ext = os.path.splitext(img_path)[1]
-                date_str = time.strftime('%Y%m%d')
-                new_name = f"已录入_{date_str}_{seq}{ext}"
-                new_path = os.path.join(os.path.dirname(img_path), new_name)
-                os.rename(img_path, new_path)
-                print(f"  已更名为: {new_name}")
-            except Exception as e:
-                print(f"  重命名失败: {e}")
 
     print(f"[DONE] 全部完成")
 

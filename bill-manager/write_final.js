@@ -245,13 +245,17 @@ function parseCustomer(ocrText) {
 }
 
 function parseAddress(ocrText) {
-    // 优先从 地址:/店址: 行提取（兼容行首 "- " 前缀）
-    const addrMatch = ocrText.match(/(?:地址|店址)[:：]\s*(.+?)(?=\n\s*(?:[-*]\s*)?(?:电话|账号|备注|经办|门店|提醒|$))/);
+    // 优先从 门店地址: 行提取（客户地址常为空，门店地址才有值）
+    const storeAddrMatch = ocrText.match(/门店地址[:：]\s*(.+?)(?=\n|$)/);
+    if (storeAddrMatch) {
+        let addr = storeAddrMatch[1].trim().replace(/[，,]\s*.*店\s*$/, '').trim(); // 去掉末尾"，万象汇店"
+        if (addr && addr.length >= 4) return addr.substring(0, 200);
+    }
+    // 其次从 客户地址:/地址:/店址: 行提取
+    const addrMatch = ocrText.match(/(?:客户地址|地址|店址)[:：]\s*(.+?)(?=\n\s*(?:[-*]\s*)?(?:电话|账号|备注|经办|门店|提醒|$))/);
     if (addrMatch) {
         let addr = addrMatch[1].trim();
-        if (addr && addr.length >= 4) {
-            return addr.substring(0, 200);
-        }
+        if (addr && addr.length >= 4) return addr.substring(0, 200);
     }
     // fallback：从第一行提取（格式如"欧洲城同花向往2楼043销售单"）
     const lines = ocrText.split('\n');
@@ -265,49 +269,51 @@ function parseAddress(ocrText) {
             if (addr.length >= 4) return addr.substring(0, 200);
         }
     }
-    // fallback2：匹配独立地址行（含市场名+楼号，如"株洲市欧洲城3楼888号"）
+    // fallback2：匹配独立地址行（含市场名+楼号，如"株洲市欧洲城3楼888号"或"万象汇富一楼A68号"）
     for (const line of lines) {
-        const m = line.match(/(?:欧洲城|万象汇|世贸|万达|广场|商城|市场)\S*?\d+楼\S+/);
+        const m = line.match(/(?:欧洲城|万象汇|世贸|万达|广场|商城|市场)\S*?(?:富|负)?(?:[一二三四五六七八九十\d]+)楼\S+/);
         if (m) return m[0].substring(0, 200);
     }
     return '';
 }
 
 function parsePrevBalance(ocrText) {
-    const m = ocrText.match(/(?:上次欠款|上次余额|上次结余|上次余|上期余额)[:：]?\s*[¥￥]?\s*(-?\d{1,10}(?:\.\d{1,2})?)/);
+    const m = ocrText.match(/(?:上次欠款|上次欠|上次余额|上次结余|上次余|上期余额)[:：\s]*[¥￥]?\s*(-?\d{1,10}(?:\.\d{1,2})?)/);
     if (!m) return 0;
     const val = parseFloat(m[1]);
-    return m[0].includes('欠款') ? val * -1 : val;
+    return /上次欠|上次欠款/.test(m[0]) ? val * -1 : val;
 }
 
 function parseCumulativeBalance(ocrText) {
-    const m = ocrText.match(/(?:累计欠款|累计结余|累计余|总计欠款|总欠款|累计余额)[:：]?\s*[¥￥]?\s*(-?\d{1,10}(?:\.\d{1,2})?)/);
+    const m = ocrText.match(/(?:累计欠款|累计欠|累计结余|累计余|总计欠款|总欠款|累计余额)[:：\s]*[¥￥]?\s*(-?\d{1,10}(?:\.\d{1,2})?)/);
     if (!m) return 0;
     const val = parseFloat(m[1]);
     const matched = m[0];
-    return matched.includes('欠款') ? val * -1 : val;
+    return /累计欠|累计欠款|总计欠款|总欠款/.test(matched) ? val * -1 : val;
 }
 
 function parseRealReceived(ocrText) {
-    const m = ocrText.match(/实收(?:金额)?[:：]\s*[¥￥]?\s*(-?\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
+    const m = ocrText.match(/实收(?:金额)?[:：\s]*[¥￥]?\s*(-?\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
     return m ? parseFloat(m[1]) : 0;
 }
 
 function parseTotal(ocrText) {
-    const m0 = ocrText.match(/扫码支付[:：]\s*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
+    const m0 = ocrText.match(/扫码支付[:：\s]*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
     if (m0) return parseFloat(m0[1]);
-    const m = ocrText.match(/(?:实付|已付|付款)[:：]\s*[¥￥]?\s*(-?\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
+    const m = ocrText.match(/(?:实付|已付|付款)[:：\s]*[¥￥]?\s*(-?\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
     if (m) return parseFloat(m[1]);
-    const m2 = ocrText.match(/微信(?:账户|支付)?[:：]\s*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
+    const m2 = ocrText.match(/微信(?:账户|支付)?[:：\s]*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
     if (m2) return parseFloat(m2[1]);
-    const m3 = ocrText.match(/现金\s*(?:账户|支付)?[:：]\s*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
+    const m3 = ocrText.match(/现金\s*(?:账户|支付)?[:：\s]*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
     if (m3) return parseFloat(m3[1]);
-    const m4 = ocrText.match(/支付宝(?:付|支付|账户)?[:：]\s*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
+    const m4 = ocrText.match(/支付宝(?:付|支付|账户)?[:：\s]*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
     if (m4) return parseFloat(m4[1]);
-    const m5 = ocrText.match(/农业银行账户[:：]\s*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
+    const m5 = ocrText.match(/农业银行账户[:：\s]*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
     if (m5) return parseFloat(m5[1]);
-    const m6 = ocrText.match(/刷卡(?:\([^)]*\))?\s*[:：]\s*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
+    const m6 = ocrText.match(/刷卡(?:\([^)]*\))?\s*[:：\s]*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
     if (m6) return parseFloat(m6[1]);
+    const m7 = ocrText.match(/汇款(?:\([^)]*\))?\s*[:：\s]*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
+    if (m7) return parseFloat(m7[1]);
     return 0;
 }
 
@@ -420,10 +426,10 @@ async function main() {
             // 只有录入成功且无识别错误时才重命名图片/视频，方便出错时重新录入
             if (!errorNote && VIDEO_PATH) {
                 const ext = path.extname(VIDEO_PATH);
-                const newName = `${videoDate.replace(/-/g, '')}_${SEQ_NO}${ext}`;
-                const { execSync } = require('child_process');
+                const newName = `已录入_${videoDate.replace(/-/g, '')}_${SEQ_NO}${ext}`;
+                const newPath = path.join(path.dirname(VIDEO_PATH), newName);
                 try {
-                    execSync(`powershell -Command "Rename-Item -LiteralPath '${VIDEO_PATH.replace(/'/g, "''")}' -NewName '${newName}'"`, { stdio: 'ignore' });
+                    fs.renameSync(VIDEO_PATH, newPath);
                     console.log(`\n文件已更名为: ${newName}`);
                 } catch (e) {
                     console.warn(`\n文件重命名失败: ${e.message}`);
