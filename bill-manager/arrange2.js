@@ -635,6 +635,8 @@ function extractGoodsCost(text, shopAbbr) {
                 codeStr = codeStr.replace(/[a-zA-Z]+$/, '');  // 8526jh → 8526
             }
             codeStr = codeStr.replace(/[－—]/g, '-');
+            // 去掉末尾的符号（-、/、_等）
+            codeStr = codeStr.replace(/[-\/_]+$/, '');
             // 如果款号不以缩写开头，加上档口拼音缩写
             if (shopAbbr && !codeStr.startsWith(shopAbbr)) codeStr = shopAbbr + codeStr;
             results.push({ code: codeStr, cost: unitPrice });
