@@ -825,8 +825,16 @@ async function writeToFeishu(accessToken, products, shopName) {
       }
 
       if (existingRemark) {
-        fields['备注'] = existingRemark + '；' + newRemark;
-        console.log(`  备注追加到现有: "${existingRemark}" + "${newRemark}"`);
+        // 过滤掉已存在的备注项，避免重复
+        const existingParts = existingRemark.split(/[；;]/).map(s => s.trim()).filter(s => s);
+        const newParts = remarkParts.filter(p => !existingParts.includes(p));
+        if (newParts.length > 0) {
+          fields['备注'] = existingRemark + '；' + newParts.join('；');
+          console.log(`  备注追加到现有: "${existingRemark}" + "${newParts.join('；')}"`);
+        } else {
+          // 所有新备注已存在，不更新
+          console.log(`  备注跳过: 所有内容已存在`);
+        }
       } else {
         fields['备注'] = newRemark;
         console.log(`  备注写入: "${newRemark}"`);

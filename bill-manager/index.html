@@ -359,6 +359,32 @@
         }
         .btn-remove:hover { background: #ff4d50; color: white; }
 
+        /* ===== Platform Toggle ===== */
+        .platform-toggle {
+            display: inline-flex;
+            background: #f0f2f5;
+            border-radius: 8px;
+            padding: 3px;
+            gap: 2px;
+        }
+        .platform-btn {
+            padding: 6px 20px;
+            font-size: 13px;
+            font-weight: 500;
+            border: none;
+            background: transparent;
+            color: #666;
+            cursor: pointer;
+            border-radius: 6px;
+            transition: all 0.2s ease;
+        }
+        .platform-btn:hover { color: #333; }
+        .platform-btn.active {
+            background: white;
+            color: #667eea;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
         /* ===== Responsive ===== */
         @media (max-width: 768px) {
             .form-row { flex-direction: column; align-items: flex-start; }
@@ -422,6 +448,13 @@
             <div class="card">
                 <div class="card-title">店铺选择</div>
                 <div class="form-row">
+                    <span class="form-label">平台</span>
+                    <div class="platform-toggle">
+                        <button class="platform-btn active" data-platform="douyin" onclick="switchPlatform('douyin', this)">抖店</button>
+                        <button class="platform-btn" data-platform="pinduoduo" onclick="switchPlatform('pinduoduo', this)">拼多多</button>
+                    </div>
+                </div>
+                <div class="form-row">
                     <span class="form-label">选择店铺</span>
                     <div class="custom-dropdown" id="shopDropdown">
                         <div class="dropdown-trigger" id="dropdownTrigger" onclick="toggleDropdown()">
@@ -445,6 +478,9 @@
                     <input type="number" id="intervalMinutes" value="30" min="1" class="form-input form-input-sm">
                     <span class="form-label" style="min-width: 20px;">分钟</span>
                     <button class="btn btn-primary" id="btn多次执行" onclick="runDouyinMulti()">多次执行</button>
+                    <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin-left:16px;font-size:13px;color:#666;">
+                        <input type="checkbox" id="autoShutdown"> 完成后自动关机
+                    </label>
                 </div>
             </div>
             <div class="card">
@@ -452,10 +488,13 @@
                 <div class="form-row">
                     <span class="form-label">每单邮费</span>
                     <input type="number" id="shippingFee" value="2.1" min="0" step="0.1" class="form-input form-input-sm">
-                    <span class="form-label" style="min-width: 50px;">元</span>
+                    <span class="form-label" style="min-width: 30px;">元</span>
                     <span class="form-label" style="margin-left: 12px;">运费险</span>
                     <input type="number" id="insurance" value="4.01" min="0" step="0.01" class="form-input form-input-sm">
-                    <span class="form-label" style="min-width: 20px;">元</span>
+                    <span class="form-label" style="min-width: 30px;">元</span>
+                    <span class="form-label" style="margin-left: 12px;">平台扣点</span>
+                    <input type="number" id="platformFee" value="0.6" min="0" max="100" step="0.01" class="form-input form-input-sm">
+                    <span class="form-label" style="min-width: 20px;">%</span>
                 </div>
             </div>
         </div>
@@ -490,13 +529,35 @@
     <script>
         // ========== 全局状态 ==========
         let isBillRunning = false;    // 票据录入/整理
-        let isDouyinRunning = false;  // 抖店商品获取
+        let isDouyinRunning = false;  // 抖店/拼多多商品获取
         let statusPolling = null;
         let selectedShop = '';
+        let selectedPlatform = 'douyin'; // douyin | pinduoduo
         let dropdownOpen = false;
         let shopsData = [];
         let autoRunning = false;
         let autoShopConfigs = [];
+
+        // ========== 平台切换 ==========
+        function switchPlatform(platform, btn) {
+            selectedPlatform = platform;
+            document.querySelectorAll('.platform-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            selectedShop = '';
+            document.getElementById('selectedShopText').textContent = '请先登录账号';
+            document.getElementById('selectedShopText').classList.add('dropdown-placeholder');
+            loadShops();
+        }
+
+        function getShopsEndpoint() {
+            return selectedPlatform === 'pinduoduo' ? '/get-pdd-shops' : '/get-shops';
+        }
+        function getLoginEndpoint() {
+            return selectedPlatform === 'pinduoduo' ? '/login-new-pdd-shop' : '/login-new-shop';
+        }
+        function getAnalyzerEndpoint() {
+            return selectedPlatform === 'pinduoduo' ? '/run-pdd-analyzer' : '/run-douyin-analyzer';
+        }
 
         // ========== 工具函数 ==========
         function fetchWithTimeout(url, opts = {}, ms = 5000) {
@@ -509,7 +570,17 @@
         function log(message, type = '') {
             const el = document.getElementById('status');
             if (!el) return;
-            const time = new Date().toLocaleTimeString();
+            // 从消息中提取服务器时间戳 [2026-06-01T04:39:52.733Z]
+            let time = '';
+            const tsMatch = message.match(/^\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z)\]\s*/);
+            if (tsMatch) {
+                try {
+                    time = new Date(tsMatch[1]).toLocaleTimeString();
+                    message = message.substring(tsMatch[0].length); // 移除时间戳前缀
+                } catch { time = new Date().toLocaleTimeString(); }
+            } else {
+                time = new Date().toLocaleTimeString();
+            }
             const cls = type ? ` class="${type}"` : '';
             el.insertAdjacentHTML('beforeend', `<span${cls}>[${time}] ${message}</span>\n`);
             el.parentElement.scrollTop = el.parentElement.scrollHeight;
@@ -543,9 +614,17 @@
                     const sr = await fetchWithTimeout('/get-process-status');
                     const sd = await sr.json();
                     if (!sd.running) {
+                        const wasRunning = isBillRunning || isDouyinRunning;
                         if (isBillRunning) { isBillRunning = false; setBillButtons(false); }
                         if (isDouyinRunning) { isDouyinRunning = false; setDouyinButtons(false); }
-                        if (!isBillRunning && !isDouyinRunning) stopStatusPolling();
+                        if (!isBillRunning && !isDouyinRunning) {
+                            stopStatusPolling();
+                            // 自动关机
+                            if (wasRunning && document.getElementById('autoShutdown')?.checked) {
+                                log('任务完成，60秒后自动关机...', 'warning');
+                                fetchWithTimeout('/schedule-shutdown', { method: 'POST' }).catch(() => {});
+                            }
+                        }
                     }
                 } catch {}
             }, 2000);
@@ -617,7 +696,9 @@
             const tc = parseInt(document.getElementById('targetCount').value) || 1;
             const sf = parseFloat(document.getElementById('shippingFee').value) || 2.1;
             const ins = parseFloat(document.getElementById('insurance').value) || 4.01;
-            startDouyinTask('/run-douyin-analyzer', { targetCount: tc, shopName: selectedShop, shippingFee: sf, insurance: ins }, `开始获取抖店商品 [${selectedShop}] (目标${tc}个)...`);
+            const pf = parseFloat(document.getElementById('platformFee').value) || 0.6;
+            const platformName = selectedPlatform === 'pinduoduo' ? '拼多多' : '抖店';
+            startDouyinTask(getAnalyzerEndpoint(), { targetCount: tc, shopName: selectedShop, shippingFee: sf, insurance: ins, platformFee: pf }, `开始获取${platformName}商品 [${selectedShop}] (目标${tc}个)...`);
         }
 
         async function stopProcess() {
@@ -701,7 +782,7 @@
         }
         async function loadShops() {
             try {
-                const res = await fetchWithTimeout('/get-shops');
+                const res = await fetchWithTimeout(getShopsEndpoint());
                 const data = await res.json();
                 shopsData = data.shops || [];
                 renderDropdownItems(); renderAutoShopList();
@@ -710,10 +791,11 @@
         async function loginNewShop() {
             if (isDouyinRunning) return;
             isDouyinRunning = true; setDouyinButtons(true);
-            log('开始登录新店铺，请在弹出的浏览器中扫码登录...', 'info');
+            const platformName = selectedPlatform === 'pinduoduo' ? '拼多多' : '抖店';
+            log(`开始登录新${platformName}店铺，请在弹出的浏览器中扫码登录...`, 'info');
             startStatusPolling();
             try {
-                const res = await fetchWithTimeout('/login-new-shop', { method: 'POST' }, 120000);
+                const res = await fetchWithTimeout(getLoginEndpoint(), { method: 'POST' }, 120000);
                 const r = await res.json();
                 if (r.success) { log('登录成功: ' + r.shopName, 'success'); await loadShops(); selectShop(r.shopName); }
                 else log('登录失败: ' + r.message, 'error');
@@ -730,11 +812,14 @@
             const im = parseInt(document.getElementById('intervalMinutes').value) || 30;
             const sf = parseFloat(document.getElementById('shippingFee').value) || 2.1;
             const ins = parseFloat(document.getElementById('insurance').value) || 4.01;
+            const pf = parseFloat(document.getElementById('platformFee').value) || 0.6;
             isDouyinRunning = true; setDouyinButtons(true);
-            log(`开始多次获取 [${selectedShop}] (目标${tc}个, 间隔${im}分钟)...`, 'info');
+            const platformName = selectedPlatform === 'pinduoduo' ? '拼多多' : '抖店';
+            log(`开始多次获取${platformName} [${selectedShop}] (目标${tc}个, 间隔${im}分钟)...`, 'info');
             startStatusPolling();
+            const multiEndpoint = selectedPlatform === 'pinduoduo' ? '/run-pdd-multi' : '/run-douyin-multi';
             try {
-                const res = await fetchWithTimeout('/run-douyin-multi', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ targetCount: tc, intervalMinutes: im, shopName: selectedShop, shippingFee: sf, insurance: ins }) }, 3600000);
+                const res = await fetchWithTimeout(multiEndpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ targetCount: tc, intervalMinutes: im, shopName: selectedShop, shippingFee: sf, insurance: ins, platformFee: pf }) }, 3600000);
                 const r = await res.json();
                 log(r.success ? '多次执行完成' : '执行失败: ' + r.message, r.success ? 'success' : 'error');
             } catch (e) { log('请求失败: ' + e.message, 'error'); }
@@ -792,8 +877,9 @@
                     log(`[自动化] ${c.shopName}: 处理 ${processed+1}-${processed+thisBatch} / ${c.targetCount}`, 'info');
                     const sf = parseFloat(document.getElementById('shippingFee').value) || 2.1;
                     const ins = parseFloat(document.getElementById('insurance').value) || 4.01;
+                    const pf = parseFloat(document.getElementById('platformFee').value) || 0.6;
                     try {
-                        const res = await fetchWithTimeout('/run-douyin-analyzer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ targetCount: thisBatch, shopName: c.shopName, shippingFee: sf, insurance: ins }) });
+                        const res = await fetchWithTimeout('/run-douyin-analyzer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ targetCount: thisBatch, shopName: c.shopName, shippingFee: sf, insurance: ins, platformFee: pf }) });
                         const r = await res.json();
                         log(r.success ? `[自动化] ${c.shopName}: ${processed+thisBatch}/${c.targetCount} 完成` : `[自动化] ${c.shopName}: 失败: ${r.message}`, r.success ? 'success' : 'error');
                     } catch (e) { log(`[自动化] ${c.shopName}: 请求失败: ${e.message}`, 'error'); }

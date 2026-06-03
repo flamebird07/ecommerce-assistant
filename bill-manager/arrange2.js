@@ -249,7 +249,8 @@ async function syncRecordToDstTable(srcRecord, recordIndex) {
     const f = srcRecord.fields;
     const shop = getText(f['档口名称']).trim();
     const batch = getText(f['批次号']).trim();
-    const srcTime = f['单据打印时间'] || 0;
+    // 单据打印时间为空时，用记录时间作fallback，避免被错误跳过
+    const srcTime = f['单据打印时间'] || f['记录时间'] || 0;
     const recordTime = getRecordTime();
 
     // 构建要写入的字段（全部照搬，只记录时间用当前时间）
@@ -634,7 +635,7 @@ function extractGoodsCost(text, shopAbbr) {
                 codeStr = codeStr.replace(/[a-zA-Z]+$/, '');  // 8526jh → 8526
             }
             codeStr = codeStr.replace(/[－—]/g, '-');
-            // 如果款号不以缩写开头，加上档口缩写
+            // 如果款号不以缩写开头，加上档口拼音缩写
             if (shopAbbr && !codeStr.startsWith(shopAbbr)) codeStr = shopAbbr + codeStr;
             results.push({ code: codeStr, cost: unitPrice });
         }
@@ -847,13 +848,14 @@ async function main() {
         const batch = getText(r.fields['批次号']).trim();
         const key = shop + '|' + batch;
         const existing = seen.get(key);
-        const curTime = r.fields['单据打印时间'] || 0;
+        // 单据打印时间为空时，用记录时间作fallback
+        const curTime = r.fields['单据打印时间'] || r.fields['记录时间'] || 0;
         // OBY记录：永远重新处理（不管表3是否有更新的）
         if (shop.includes('欧贝缘')) {
             seen.set(key, r);  // 强制覆盖
             continue;
         }
-        if (!existing || curTime > (existing.fields['单据打印时间'] || 0)) seen.set(key, r);
+        if (!existing || curTime > (existing.fields['单据打印时间'] || existing.fields['记录时间'] || 0)) seen.set(key, r);
     }
     // 按原始序号排序
     const unique = Array.from(seen.values()).sort((a, b) => idToIdx.get(a.id) - idToIdx.get(b.id));

@@ -317,6 +317,159 @@ function parseTotal(ocrText) {
     return 0;
 }
 
+// 解析拿货件数（销数/合计）
+function parseSalesQuantity(ocrText) {
+    // 优先匹配 销数（正数才是拿货）
+    const m = ocrText.match(/销数[:：\s]*(\d{1,10})/);
+    if (m) return parseInt(m[1]);
+    // 匹配 退货:退X 格式（纯退货单，拿货为0）
+    const m5 = ocrText.match(/退货[：:]\s*退\s*(\d{1,10})/);
+    if (m5) return 0;
+    // 匹配 数量: X 格式（独立行，非表格内）
+    const mQty = ocrText.match(/^数量[:：\s]+(\d{1,10})\s*$/m);
+    if (mQty) return parseInt(mQty[1]);
+    // 从明细行计算正数数量（混合单据：拿货+退货）
+    // 只在合计行之前的明细行中查找，避免匹配核销记录等其他表格
+    let salesTotal = 0;
+    let reachedSummary = false;
+    let qtyColIndex = -1; // 数量列的索引
+    const lines = ocrText.split('\n');
+    for (const line of lines) {
+        if (line.includes('合计')) { reachedSummary = true; continue; }
+        if (reachedSummary) continue;
+        if (/^[-]+$/.test(line.trim())) continue;
+        // 匹配表格行
+        if (line.includes('|')) {
+            // 不过滤空字符串，保持列索引正确
+            const parts = line.split('|').map(p => p.trim());
+            // 去掉首尾空元素（行首尾的|产生的空字符串）
+            while (parts.length > 0 && parts[0] === '') parts.shift();
+            while (parts.length > 0 && parts[parts.length - 1] === '') parts.pop();
+            // 检查是否是表头行，找到"数量"列的位置
+            if (line.includes('款号') || line.includes('名称')) {
+                const numIdx = parts.findIndex(p => p === '数量');
+                if (numIdx >= 0) qtyColIndex = numIdx;
+                continue;
+            }
+            // 使用"数量"列的索引，或默认第3列
+            const idx = qtyColIndex >= 0 ? qtyColIndex : 2;
+            if (parts.length > idx) {
+                const qty = parseInt(parts[idx]);
+                if (!isNaN(qty) && qty > 0 && qty < 10000) {
+                    salesTotal += qty;
+                    continue;
+                }
+            }
+        }
+        // 匹配普通格式: 款号 名称 数量 单价 金额
+        const plainM = line.match(/^[^\s]+\s+[^\s]+\s+(\d{1,10})\s+\d/);
+        if (plainM) { salesTotal += parseInt(plainM[1]); }
+    }
+    if (salesTotal > 0) return salesTotal;
+    // 明细行没有正数，用合计作fallback
+    const m2 = ocrText.match(/合计[：:]\s*数量\s*(\d{1,10})/);
+    if (m2) return parseInt(m2[1]);
+    const m3 = ocrText.match(/合计[：:]\s*总数[：:]\s*(\d{1,10})/);
+    if (m3) return parseInt(m3[1]);
+    for (const line of lines) {
+        if (line.includes('合计')) {
+            // 匹配正数（不带负号的数字），避免把-9的绝对值9当成拿货
+            const nums = line.match(/(?<!-)\b(\d{1,10})\b/g);
+            if (nums && nums.length >= 1) {
+                const firstNum = parseInt(nums[0]);
+                if (firstNum > 0 && firstNum < 10000) return firstNum;
+            }
+        }
+    }
+    return 0;
+}
+
+// 解析退货件数（退数）
+function parseReturnQuantity(ocrText) {
+    const m = ocrText.match(/退数[:：\s]*(\d{1,10})/);
+    if (m) return parseInt(m[1]);
+    // 匹配 退货:退X 格式
+    const m2 = ocrText.match(/退货[：:]\s*退\s*(\d{1,10})/);
+    if (m2) return parseInt(m2[1]);
+    // 从明细行计算负数数量（混合单据：拿货+退货）
+    // 只在合计行之前的明细行中查找，避免匹配核销记录等其他表格
+    let returnTotal = 0;
+    let reachedSummary = false;
+    let qtyColIndex = -1;
+    const lines = ocrText.split('\n');
+    for (const line of lines) {
+        if (line.includes('合计')) { reachedSummary = true; continue; }
+        if (reachedSummary) continue;
+        if (/^[-]+$/.test(line.trim())) continue;
+        if (line.includes('|')) {
+            const parts = line.split('|').map(p => p.trim());
+            while (parts.length > 0 && parts[0] === '') parts.shift();
+            while (parts.length > 0 && parts[parts.length - 1] === '') parts.pop();
+            if (line.includes('款号') || line.includes('名称')) {
+                const numIdx = parts.findIndex(p => p === '数量');
+                if (numIdx >= 0) qtyColIndex = numIdx;
+                continue;
+            }
+            const idx = qtyColIndex >= 0 ? qtyColIndex : 2;
+            if (parts.length > idx) {
+                const qty = parseInt(parts[idx]);
+                if (!isNaN(qty) && qty < 0 && qty > -10000) {
+                    returnTotal += Math.abs(qty);
+                    continue;
+                }
+            }
+        }
+        const plainM = line.match(/^[^\s]+\s+[^\s]+\s+(-\d{1,10})\s+\d/);
+        if (plainM) { returnTotal += Math.abs(parseInt(plainM[1])); }
+    }
+    if (returnTotal > 0) return returnTotal;
+    // 明细行没有负数，用合计作fallback（只有负数合计才是退货）
+    const m3 = ocrText.match(/合计[：:]\s*数量\s*(-\d{1,10})/);
+    if (m3) return Math.abs(parseInt(m3[1]));
+    const m4 = ocrText.match(/总数[:：\s]*(-\d{1,10})/);
+    if (m4 && !ocrText.match(/销数[:：\s]*\d/) && !ocrText.match(/退数[:：\s]*\d/)) {
+        return Math.abs(parseInt(m4[1]));
+    }
+    // 匹配 合计后跟负数
+    for (const line of lines) {
+        if (line.includes('合计')) {
+            const nums = line.match(/-\d+/g);
+            if (nums && nums.length >= 1) {
+                const firstNum = parseInt(nums[0]);
+                if (firstNum < 0 && firstNum > -10000) return Math.abs(firstNum);
+            }
+        }
+    }
+    return 0;
+}
+
+// 解析总数（用于验证，保留正负号）
+function parseTotalQuantity(ocrText) {
+    const m = ocrText.match(/总数[:：\s]*(-?\d{1,10})/);
+    if (m) return parseInt(m[1]);
+    // 匹配 合计：数量X 格式
+    const m2 = ocrText.match(/合计[：:]\s*数量\s*(-?\d{1,10})/);
+    if (m2) return parseInt(m2[1]);
+    // 从合计行提取
+    const lines = ocrText.split('\n');
+    for (const line of lines) {
+        if (line.includes('合计')) {
+            const nums = line.match(/-?\d+/g);
+            if (nums && nums.length >= 1) {
+                const firstNum = parseInt(nums[0]);
+                if (Math.abs(firstNum) > 0 && Math.abs(firstNum) < 10000) return firstNum;
+            }
+        }
+    }
+    return 0;
+}
+
+// 解析总额（用于验证）
+function parseTotalAmount(ocrText) {
+    const m = ocrText.match(/总额[:：\s]*[¥￥]?\s*(-?\d{1,10}(?:\.\d{1,2})?)/);
+    return m ? parseFloat(m[1]) : 0;
+}
+
 // ========== 主流程 ==========
 
 async function main() {
@@ -364,6 +517,28 @@ async function main() {
         const realReceived = parseRealReceived(ocrText);
         const paymentAmt = realReceived !== 0 ? realReceived : parseTotal(ocrText);
 
+        // 解析件数
+        let salesQty = parseSalesQuantity(ocrText);
+        let returnQty = parseReturnQuantity(ocrText);
+        const totalQty = parseTotalQuantity(ocrText);
+
+        // 验证件数合理性
+        if (totalQty !== 0) {
+            // 总数 = 销数 - 退数
+            const expectedTotal = salesQty - returnQty;
+            if (expectedTotal !== totalQty) {
+                if (returnQty === 0 && salesQty === 0) {
+                    // 都没识别到，用总数作为拿货件数
+                    salesQty = Math.abs(totalQty);
+                }
+            }
+        }
+        // totalQty=0 且 salesQty=0 且 returnQty>0：纯退货单，无需修正
+        // 退数不能为负
+        if (returnQty < 0) returnQty = Math.abs(returnQty);
+        // 销数不能为负
+        if (salesQty < 0) salesQty = Math.abs(salesQty);
+
         // 单据打印时间 = 票据结尾时间戳
         const billTimeMs = parsed ? new Date(parsed.full).getTime() : null;
         // 是否错误 = 与推断视频日期比较，不一致则标"日期无法识别"
@@ -407,13 +582,15 @@ async function main() {
             "地址": address,
             "上次结余": prevBalance,
             "累计结余": cumBalance,
-            "付款金额": paymentAmt
+            "付款金额": paymentAmt,
+            "拿货件数": salesQty,
+            "退货件数": returnQty
         };
         if (billDateMs) fields["开单日期"] = billDateMs;
         if (fileToken) fields["单据截图"] = [{ file_token: fileToken, name: `bill_seg${segId}.jpg` }];
 
         // 录入日志
-        console.log(`  [${i+1}/${bills.length}] 档口:${shopName || '??'} 批次:${batchNo || '??'} 上次结余:${prevBalance} 累计结余:${cumBalance} 付款:${paymentAmt} ${errorNote ? '⚠ ' + errorNote : '✓'}`);
+        console.log(`  [${i+1}/${bills.length}] 档口:${shopName || '??'} 批次:${batchNo || '??'} 上次结余:${prevBalance} 累计结余:${cumBalance} 付款:${paymentAmt} 拿货:${salesQty} 退货:${returnQty} ${errorNote ? '⚠ ' + errorNote : '✓'}`);
 
         await sleep(500);  // 限速延迟
         const res = await createRecord(token, fields);

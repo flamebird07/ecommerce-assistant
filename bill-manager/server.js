@@ -12,6 +12,45 @@ const PORT = 3000;
 const WORKSPACE = __dirname;
 const COOKIES_DIR = path.join(__dirname, 'cookies');
 
+// ========== 防止多实例运行 ==========
+const LOCK_FILE = path.join(WORKSPACE, '.server.lock');
+function checkLock() {
+    try {
+        if (fs.existsSync(LOCK_FILE)) {
+            const pid = parseInt(fs.readFileSync(LOCK_FILE, 'utf8').trim());
+            // 检查进程是否还在运行
+            try {
+                process.kill(pid, 0); // 不发送信号，只检查进程是否存在
+                console.error(`服务已在运行中 (PID: ${pid})，请先停止再启动`);
+                process.exit(1);
+            } catch {
+                // 进程不存在，清理旧锁文件
+                fs.unlinkSync(LOCK_FILE);
+            }
+        }
+        fs.writeFileSync(LOCK_FILE, process.pid.toString());
+    } catch (err) {
+        console.error('锁文件处理失败:', err.message);
+    }
+}
+function releaseLock() {
+    try {
+        if (fs.existsSync(LOCK_FILE)) fs.unlinkSync(LOCK_FILE);
+    } catch {}
+}
+checkLock();
+
+// ========== 全局错误处理 ==========
+process.on('uncaughtException', (err) => {
+    console.error('未捕获异常:', err);
+    log('服务异常: ' + err.message);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('未处理的Promise拒绝:', reason);
+});
+process.on('SIGINT', () => { releaseLock(); process.exit(0); });
+process.on('SIGTERM', () => { releaseLock(); process.exit(0); });
+
 // 日志文件
 const LOG_FILE = path.join(WORKSPACE, 'bill.log');
 
@@ -34,9 +73,17 @@ function getShops() {
 // 删除店铺cookie
 function removeShop(shopName) {
     try {
+        // 检查抖店cookies目录
         const cookiePath = path.join(COOKIES_DIR, `${shopName}.json`);
         if (fs.existsSync(cookiePath)) {
             fs.unlinkSync(cookiePath);
+            return true;
+        }
+        // 检查拼多多cookies目录
+        const pddCookiesDir = path.join(WORKSPACE, 'pdd-cookies');
+        const pddCookiePath = path.join(pddCookiesDir, `${shopName}.json`);
+        if (fs.existsSync(pddCookiePath)) {
+            fs.unlinkSync(pddCookiePath);
             return true;
         }
     } catch (err) {}
@@ -54,7 +101,9 @@ function getLogs() {
     try {
         if (fs.existsSync(LOG_FILE)) {
             const content = fs.readFileSync(LOG_FILE, 'utf8');
-            const lines = content.split('\n').map(l => l.replace(/[\r]/g, '').trim()).filter(l => l);
+            const lines = content.split('\n')
+                .map(l => l.replace(/[\r]/g, '').replace(/\\/g, '/').replace(/"/g, "'").trim())
+                .filter(l => l);
             // 只返回最近2小时的日志
             const cutoff = Date.now() - 2 * 60 * 60 * 1000;
             const filtered = lines.filter(line => {
@@ -72,9 +121,24 @@ function getLogs() {
 
 function logToFile(msg) {
     const time = new Date().toISOString();
-    // 清理消息中的特殊字符
-    const clean = msg.replace(/[\r]/g, '').substring(0, 500);
+    // 清理消息中的特殊字符，确保JSON安全
+    const clean = msg
+        .replace(/[\r]/g, '')
+        .replace(/\\/g, '/')
+        .replace(/"/g, "'")
+        .replace(/[\x00-\x1f\x7f-\x9f]/g, '')
+        .substring(0, 500);
     fs.appendFileSync(LOG_FILE, `[${time}] ${clean}\n`);
+    // 日志轮转：超过5MB时截断
+    try {
+        const stats = fs.statSync(LOG_FILE);
+        if (stats.size > 5 * 1024 * 1024) {
+            const content = fs.readFileSync(LOG_FILE, 'utf8');
+            const lines = content.split('\n');
+            const keep = lines.slice(-1000);
+            fs.writeFileSync(LOG_FILE, keep.join('\n'));
+        }
+    } catch {}
 }
 
 function log(msg) {
@@ -258,6 +322,13 @@ const server = http.createServer((req, res) => {
 
     // 整理票据 - 使用 arrange2.js
     if (req.url === '/run-arrange' && req.method === 'POST') {
+        if (isBillCheckRunning) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: '已有运行的进程' }));
+            return;
+        }
+        isBillCheckRunning = true;
+
         // 立即返回响应，不等待请求体
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true, message: '已启动' }));
@@ -269,7 +340,8 @@ const server = http.createServer((req, res) => {
 
         const node = spawn('node', [path.join(WORKSPACE, 'arrange2.js')], {
             shell: true,
-            cwd: WORKSPACE
+            cwd: WORKSPACE,
+            env: { ...process.env, NODE_OPTIONS: '' }
         });
         currentProcess = node;
 
@@ -285,6 +357,7 @@ const server = http.createServer((req, res) => {
 
         node.on('close', (code) => {
             currentProcess = null;
+            isBillCheckRunning = false;
             log('=== 整理票据结束 ===');
         });
         return;
@@ -574,10 +647,107 @@ const server = http.createServer((req, res) => {
         return;
     }
 
+    // ========== 拼多多相关接口 ==========
+    // 获取拼多多店铺列表（使用独立的cookies目录）
+    if (req.url === '/get-pdd-shops' && req.method === 'GET') {
+        const pddCookiesDir = path.join(WORKSPACE, 'pdd-cookies');
+        try {
+            if (!fs.existsSync(pddCookiesDir)) fs.mkdirSync(pddCookiesDir, { recursive: true });
+            const files = fs.readdirSync(pddCookiesDir);
+            const shops = files.filter(f => f.endsWith('.json')).map(f => f.replace('.json', ''));
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ shops }));
+        } catch {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ shops: [] }));
+        }
+        return;
+    }
+
+    // 登录新拼多多店铺
+    if (req.url === '/login-new-pdd-shop' && req.method === 'POST') {
+        log('=== 开始登录拼多多店铺 ===');
+        const pddLoginScript = path.join(WORKSPACE, 'pdd-login-shop.js');
+        if (!fs.existsSync(pddLoginScript)) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: '拼多多登录脚本不存在，请先创建 pdd-login-shop.js' }));
+            return;
+        }
+        const node = spawn('node', [pddLoginScript], { shell: true, cwd: WORKSPACE });
+        let shopName = '';
+        node.stdout.on('data', (data) => {
+            const msg = data.toString().trim();
+            if (msg) { log(msg); if (msg.startsWith('SHOP_NAME:')) shopName = msg.replace('SHOP_NAME:', ''); }
+        });
+        node.stderr.on('data', (data) => { const msg = data.toString().trim(); if (msg) log('[错误] ' + msg); });
+        node.on('close', (code) => {
+            log('=== 登录拼多多店铺结束 ===');
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(code === 0 && shopName ? { success: true, shopName } : { success: false, message: '登录失败或超时' }));
+        });
+        return;
+    }
+
+    // 拼多多商品获取
+    if (req.url === '/run-pdd-analyzer' && req.method === 'POST') {
+        if (isDouyinRunning) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: '已有运行的进程' }));
+            return;
+        }
+        isDouyinRunning = true;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, message: '已启动' }));
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => {
+            let targetCount = 1, shopName = '', shippingFee = 2.1, insurance = 4.01;
+            try {
+                const parsed = JSON.parse(body);
+                targetCount = parseInt(parsed.targetCount) || 1;
+                shopName = parsed.shopName || '';
+                shippingFee = parseFloat(parsed.shippingFee) || 2.1;
+                insurance = parseFloat(parsed.insurance) || 4.01;
+            } catch {}
+            log(`=== 开始获取拼多多商品 (目标${targetCount}个) [${shopName}] ===`);
+            const pddScript = path.join(WORKSPACE, 'pdd-shop-analyzer.js');
+            if (!fs.existsSync(pddScript)) {
+                isDouyinRunning = false;
+                log('[错误] 拼多多脚本不存在: pdd-shop-analyzer.js');
+                log('=== 拼多多商品获取结束 ===');
+                return;
+            }
+            const node = spawn('node', [pddScript, targetCount.toString()], { shell: true, cwd: WORKSPACE });
+            currentProcess = node;
+            node.stdout.on('data', (data) => { const msg = data.toString().trim(); if (msg) log(msg); });
+            node.stderr.on('data', (data) => { const msg = data.toString().trim(); if (msg) log('[错误] ' + msg); });
+            node.on('close', (code) => { currentProcess = null; isDouyinRunning = false; log('=== 拼多多商品获取结束 ==='); });
+        });
+        return;
+    }
+
     // 获取日志
     if (req.url === '/get-logs' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ logs: getLogs() }));
+        return;
+    }
+
+    // 定时关机（60秒后）
+    if (req.url === '/schedule-shutdown' && req.method === 'POST') {
+        log('=== 60秒后自动关机 ===');
+        spawn('shutdown', ['-s', '-t', '60'], { shell: true });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+        return;
+    }
+
+    // 取消关机
+    if (req.url === '/cancel-shutdown' && req.method === 'POST') {
+        spawn('shutdown', ['-a'], { shell: true });
+        log('=== 已取消自动关机 ===');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
         return;
     }
 
@@ -586,6 +756,18 @@ const server = http.createServer((req, res) => {
     res.end('Not Found');
 });
 
+
+server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+        console.error(`端口 ${PORT} 已被占用，请先停止占用该端口的进程`);
+        releaseLock();
+        process.exit(1);
+    }
+    console.error('服务器错误:', err);
+});
+
+// 确保退出时清理锁文件
+process.on('exit', releaseLock);
 
 server.listen(PORT, () => {
     log(`票据管理服务已启动: http://localhost:${PORT}`);
