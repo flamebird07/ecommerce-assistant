@@ -998,8 +998,18 @@ async function main() {
 
         // 清理款号：去掉中文字符，保留数字和字母
         let newCode = oldCode.replace(/[一-鿿]+/g, '');
+        // 去掉末尾的符号（-、/、_等）
+        newCode = newCode.replace(/[-\/_]+$/, '');
         // 如果款号不以缩写开头，加上缩写
         if (shopAbbr && !newCode.startsWith(shopAbbr)) {
+            // 检查是否有其他店铺的缩写前缀，如果有则替换
+            const otherPrefixes = ['SZTC', 'YDD', 'ASYG', 'PPT', 'XLFE', 'WXE', 'XFS', 'GZKK', 'XWYDL', 'LXJ', 'XW', 'ZL', 'SWKJ', 'YMR', 'XMY', 'SDBR', 'HBJJ', 'YXY', 'JXG', 'XYM', 'XYGCD', 'JQM', 'XNF', 'AB', 'MYS', 'TYTS'];
+            for (const prefix of otherPrefixes) {
+                if (newCode.startsWith(prefix) && prefix !== shopAbbr) {
+                    newCode = newCode.substring(prefix.length);
+                    break;
+                }
+            }
             newCode = shopAbbr + newCode;
         }
 
