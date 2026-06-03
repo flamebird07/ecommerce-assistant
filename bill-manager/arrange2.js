@@ -968,6 +968,51 @@ async function main() {
         await sleep(500);
     }
     console.log(`去重完成: 删除 ${deletedDedup} 条`);
+
+    // ========== 第3步：修复4号表格中包含中文的款号 ==========
+    console.log('\n[FIX-TBL4] 修复4号表格款号...');
+    let tbl4FixAll = [], tbl4FixPt = '', tbl4FixRetries = 3;
+    while (true) {
+        const list = await listRecords(TBL4, 100, tbl4FixPt);
+        if (list.error) { await sleep(2000); tbl4FixRetries--; if (tbl4FixRetries <= 0) break; continue; }
+        if (list.data && list.data.items) tbl4FixAll.push(...list.data.items);
+        if (!list.data.has_more) break;
+        tbl4FixPt = list.data.page_token;
+        await sleep(500);
+    }
+
+    const badRecords = tbl4FixAll.filter(r => {
+        const code = (getText(r.fields['款号']) || '').trim();
+        return /[一-鿿]/.test(code);
+    });
+
+    console.log(`4号表格共 ${tbl4FixAll.length} 条, 需修复 ${badRecords.length} 条`);
+
+    let fixedCount = 0;
+    for (const r of badRecords) {
+        const oldCode = getText(r.fields['款号']).trim();
+        const shopName = getText(r.fields['档口']) || '';
+        const shopAbbr = getPinyinInitials(shopName) || shopName.substring(0, 2);
+
+        // 清理款号：去掉中文字符，保留数字和字母
+        let newCode = oldCode.replace(/[一-鿿]+/g, '');
+        // 如果款号不以缩写开头，加上缩写
+        if (shopAbbr && !newCode.startsWith(shopAbbr)) {
+            newCode = shopAbbr + newCode;
+        }
+
+        if (newCode !== oldCode) {
+            const res = await updateRecord(TBL4, r.id, { '款号': newCode });
+            if (res.code === 0) {
+                fixedCount++;
+                console.log(`  修复 ${oldCode} -> ${newCode} (${shopName})`);
+            } else {
+                console.log(`  修复失败 ${oldCode}: ${res.msg || res.error?.msg}`);
+            }
+            await sleep(100);
+        }
+    }
+    console.log(`款号修复完成: ${fixedCount} 条`);
 }
 
 main().catch(console.error);
