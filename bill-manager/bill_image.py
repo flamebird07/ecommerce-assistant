@@ -12,8 +12,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-if sys.platform == "win32":
-    import io; sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+# 不使用TextIOWrapper，它会覆盖-u的无缓冲设置，导致日志不能实时输出
 
 import requests, subprocess
 
@@ -168,7 +167,7 @@ def parse_date(text):
     if m: return {'full': m.group(1), 'date': m.group(1)}
     return None
 
-def process_image(img_path, record_time, seq_no):
+def process_image(img_path, record_time, seq_no, total=1, current=1):
     print(f"[IMG] {os.path.basename(img_path)}")
     text = ocr_image(img_path)
     if not text:
@@ -205,7 +204,7 @@ def process_image(img_path, record_time, seq_no):
     # 实时输出write_final.js的日志（不捕获，直接显示）
     r = subprocess.run(['node', WRITE_FINAL_JS, tmp_json,
         'CfAXbSrUFaBLv3stSRrcuUVon1b', 'tblua6KaZ6PiWAp6',
-        record_time, img_path, seq_no],
+        record_time, img_path, seq_no, str(total), str(current)],
         text=True, encoding='utf-8', errors='replace')
     os.remove(tmp_json)
 
@@ -237,9 +236,11 @@ def main():
         print("[DONE] 无图片可处理")
         return
 
+    total = len(files)
     for i, img_path in enumerate(files):
         seq = f"{i+1:03d}"
-        ok = process_image(img_path, record_time_ms, seq)
+        print(f"\n[{i+1}/{total}] 处理: {os.path.basename(img_path)}")
+        ok = process_image(img_path, record_time_ms, seq, total, i+1)
 
     print(f"[DONE] 全部完成")
 

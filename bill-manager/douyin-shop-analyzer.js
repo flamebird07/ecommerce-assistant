@@ -14,6 +14,18 @@ const COOKIES_DIR = path.join(__dirname, 'cookies');
 let SHIPPING_FEE = 2.1;
 let INSURANCE = 4.01;
 
+// 计算建议毛利（达到3%利润目标）
+// 推导：令平均单利润 >= 售价×3%，求最小毛利
+// 毛利 × (0.994×(1-退款率) - 0.03) >= 成本×0.03 + 成本×0.006×(1-退款率) + 固定成本
+function calcMinGross(cost, returnRate) {
+    const rd = returnRate / 100;
+    const fixedCost = SHIPPING_FEE + INSURANCE;
+    const num = cost * 0.03 + cost * 0.006 * (1 - rd) + fixedCost;
+    const den = 0.994 * (1 - rd) - 0.03;
+    if (den <= 0) return Infinity; // 退款率太高，无法达到3%利润
+    return num / den;
+}
+
 const CONFIG = {
   feishu: {
     app_id: 'cli_a91ad5ae63385bc9',
@@ -380,6 +392,53 @@ async function checkRecentRecord(accessToken, productId) {
   return false;
 }
 
+// 从订单列表页面获取商品数据（商家编码、售价、图片）
+async function getOrderData(page, orderListUrl) {
+  try {
+    // 等待页面加载
+    await page.waitForTimeout(5000);
+    const orderData = await page.evaluate(() => {
+      const rows = document.querySelectorAll('tbody tr');
+      if (rows.length === 0) return { found: false, reason: 'no_rows' };
+
+      for (const row of rows) {
+        const rowText = row.innerText || '';
+        if (rowText.includes('暂无数据')) return { found: false, reason: 'no_data' };
+
+        let merchantCode = '';
+        let merchantIncome = '';
+        const img = row.querySelector('img');
+
+        // 查找商家编码
+        const codeMatch = rowText.match(/商家编码[：:]\s*(\S+)/);
+        if (codeMatch) merchantCode = codeMatch[1];
+
+        // 查找商家收入
+        const incomeMatch = rowText.match(/¥\s*([\d,]+\.?\d*)/g);
+        if (incomeMatch && incomeMatch.length >= 2) {
+          merchantIncome = incomeMatch[1].replace(/[¥,\s]/g, '');
+        } else if (incomeMatch && incomeMatch.length === 1) {
+          merchantIncome = incomeMatch[0].replace(/[¥,\s]/g, '');
+        }
+
+        if (merchantCode || merchantIncome) {
+          return {
+            found: true,
+            imageUrl: img ? img.src : '',
+            merchantCode: merchantCode,
+            merchantIncome: merchantIncome
+          };
+        }
+      }
+      return { found: false, reason: 'not_found' };
+    });
+    return orderData;
+  } catch (e) {
+    console.log(`  getOrderData error: ${e.message}`);
+    return { found: false, reason: e.message };
+  }
+}
+
 // 清理旧记录：删除记录时间超过10天且30天成交订单数>=最小订单数的记录
 async function cleanOldRecords(accessToken, shopName, minOrderCount) {
   const baseUrl = `https://open.feishu.cn/open-apis/bitable/v1/apps/${CONFIG.feishu.app_token}/tables/${CONFIG.feishu.table_id}`;
@@ -477,12 +536,13 @@ async function cleanOldRecords(accessToken, shopName, minOrderCount) {
 async function writeToFeishu(accessToken, products, shopName) {
   const baseUrl = `https://open.feishu.cn/open-apis/bitable/v1/apps/${CONFIG.feishu.app_token}/tables/${CONFIG.feishu.table_id}`;
 
-  // 先获取所有现有记录，构建商品id -> record_id 和 record_id -> 备注/已经干预/订单数 映射
+  // 先获取所有现有记录，构建商品id -> record_id 和 record_id -> 备注/已经干预/订单数/成本 映射
   console.log('获取现有记录...');
   const existingRecords = new Map();  // productId -> recordId
   const recordRemarks = new Map();    // recordId -> 备注值（用于append）
   const recordIntervention = new Map(); // recordId -> 已经干预值（更新时保留）
   const recordOrderCounts = new Map(); // recordId -> 原30天成交订单数（用于下滑检测）
+  const recordCosts = new Map();       // recordId -> 成本（更新时保留）
   let pageToken = '';
 
   do {
@@ -514,6 +574,11 @@ async function writeToFeishu(accessToken, products, shopName) {
           const existingOrderCount = item.fields['30天成交订单数'];
           if (existingOrderCount !== undefined && existingOrderCount !== null) {
             recordOrderCounts.set(item.record_id, Number(existingOrderCount));
+          }
+          // 保存现有成本（用于更新时保留）
+          const existingCost = item.fields['成本'];
+          if (existingCost !== undefined && existingCost !== null) {
+            recordCosts.set(item.record_id, Number(existingCost));
           }
         }
       }
@@ -595,17 +660,19 @@ async function writeToFeishu(accessToken, products, shopName) {
       fields['毛利'] = Number(grossProfit.toFixed(2));
       console.log(`  毛利: ${product.merchantIncome} - ${product.cost} = ${fields['毛利']}`);
 
-      // 计算平均每单利润
+      // 计算平均每单利润（用连续值，不用Math.round）
       const orderNum = product.orderCount || 0;
       const listRate = product.listReturnRate || 0;
       const correctedRate = product.returnRate || 0;
       const maxRate = Math.max(listRate, correctedRate);
+      let avgProfitPerOrder = 0;
       if (orderNum > 0) {
         const price = product.merchantIncome;
         const cost = product.cost;
         const returnRateDecimal = maxRate / 100;
-        const successOrders = Math.round(orderNum * (1 - returnRateDecimal));
-        const refundOrders = orderNum - successOrders;
+        // 不用Math.round，用连续值计算，避免向上取整导致利润高估
+        const successOrders = orderNum * (1 - returnRateDecimal);
+        const refundOrders = orderNum * returnRateDecimal;
         const commission = price * 0.006;
         // 成功订单利润
         const profitPerSuccess = price - cost - commission - SHIPPING_FEE - INSURANCE;
@@ -613,15 +680,39 @@ async function writeToFeishu(accessToken, products, shopName) {
         const costPerRefund = SHIPPING_FEE + INSURANCE;
         // 总利润
         const totalProfit = (profitPerSuccess * successOrders) - (costPerRefund * refundOrders);
-        const avgProfitPerOrder = totalProfit / orderNum;
+        avgProfitPerOrder = totalProfit / orderNum;
         fields['平均每单利润'] = Number(avgProfitPerOrder.toFixed(2));
-        console.log(`  平均每单利润: ${fields['平均每单利润']}元 (订单${orderNum}单, 退货率${maxRate}%, 成功${successOrders}单, 退货${refundOrders}单)`);
+        console.log(`  平均每单利润: ${fields['平均每单利润']}元 (订单${orderNum}单, 退货率${maxRate}%, 成功${successOrders.toFixed(1)}单, 退货${refundOrders.toFixed(1)}单)`);
       }
 
       // 获取现有干预内容，用于跳过已有人工标记的建议
       const recordIdForInter = existingRecords.get(productIdStr);
       const existingIntervention = recordIdForInter ? recordIntervention.get(recordIdForInter) : null;
       const interventionStr = existingIntervention ? String(existingIntervention) : '';
+
+      // 高退货率强制毛利至少80元：订单>10 且 近30天退款率>70% 且 修正退款率>75%
+      // 但如果平均每单利润已高于纯利3%，说明当前毛利已足够，不需要建议
+      const pureProfit3High = (product.merchantIncome || 0) * 0.03;
+      if (orderNum > 10 && listRate > 0.70 && correctedRate > 0.75 && avgProfitPerOrder <= pureProfit3High) {
+        if (product.cost !== undefined && product.cost !== null && product.merchantIncome) {
+          const currentGross = product.merchantIncome - product.cost;
+          // 按正常公式计算建议毛利
+          const rd = maxRate / 100;
+          const minGross = calcMinGross(product.cost, maxRate);
+          const sg = Math.max(Math.ceil(minGross), 80); // 至少80元
+          if (sg > currentGross) {
+            fields['等待人工操作'] = `建议毛利${sg}元`;
+            console.log(`  高退货率建议毛利: 订单${orderNum}, 退货率${maxRate}%, 需毛利${sg}, 当前毛利${currentGross.toFixed(0)}元`);
+          }
+        }
+        // 没有成本或计算不出时，兜底80元
+        if (!fields['等待人工操作']) {
+          fields['等待人工操作'] = '建议毛利80元';
+          console.log(`  高退货率兜底毛利80元: 订单${orderNum}, 近30天退款率${listRate}%, 修正退款率${correctedRate}%`);
+        }
+      } else if (orderNum > 10 && listRate > 0.70 && correctedRate > 0.75) {
+        console.log(`  跳过高退货率建议: 平均每单利润${avgProfitPerOrder.toFixed(2)} > 纯利3%${pureProfit3High.toFixed(2)}，当前毛利已足够`);
+      } else {
       function shouldSkipIntervention(suggestionText) {
         if (!interventionStr) return false;
         // 已有建议毛利则跳过新的建议毛利（不管金额是否相同）
@@ -640,49 +731,40 @@ async function writeToFeishu(accessToken, products, shopName) {
       let suggestedGrossText = '';
       if (interventionStr.includes('已下架')) {
         console.log(`  不建议下架：已经干预包含已下架`);
-      } else if (orderNum >= 5 && maxRate > 90) {
+      } else if (orderNum >= 5 && maxRate > 0.90) {
         // 销量>=5且退货率>90%，建议下架
         suggestionText = '建议下架';
         // 同时计算建议毛利
         if (product.cost !== undefined && product.cost !== null && product.merchantIncome) {
-          const rd = maxRate / 100;
-          const fixedCost = SHIPPING_FEE + INSURANCE;
-          const denom = 0.964 - 0.994 * rd;
-          if (denom > 0) {
-            const minGross = (product.cost * (0.036 - 0.006 * rd) + fixedCost) / denom;
-            const currentGross = product.merchantIncome - product.cost;
-            if (minGross > currentGross) {
-              const sg = Math.ceil(minGross);
-              suggestedGrossText = `建议毛利${sg}元`;
-              console.log(`  动态涨价建议: 成本${product.cost}, 退货率${maxRate}%, 需毛利${sg}, 当前毛利${currentGross.toFixed(0)}`);
-            }
+          const minGross = calcMinGross(product.cost, maxRate);
+          const currentGross = product.merchantIncome - product.cost;
+          if (minGross > currentGross) {
+            const sg = Math.ceil(minGross);
+            suggestedGrossText = `建议毛利${sg}元`;
+            console.log(`  动态涨价建议: 成本${product.cost}, 退货率${maxRate}%, 需毛利${sg}, 当前毛利${currentGross.toFixed(0)}`);
           }
         }
-      } else if (orderNum >= 4 && maxRate >= 100) {
+      } else if (orderNum >= 4 && maxRate >= 1.0) {
         // 销量>=4且退货率=100%，建议下架
         suggestionText = '建议下架';
         // 同时计算建议毛利
         if (product.cost !== undefined && product.cost !== null && product.merchantIncome) {
-          const rd = maxRate / 100;
-          const fixedCost = SHIPPING_FEE + INSURANCE;
-          const denom = 0.964 - 0.994 * rd;
-          if (denom > 0) {
-            const minGross = (product.cost * (0.036 - 0.006 * rd) + fixedCost) / denom;
-            const currentGross = product.merchantIncome - product.cost;
-            if (minGross > currentGross) {
-              const sg = Math.ceil(minGross);
-              suggestedGrossText = `建议毛利${sg}元`;
-              console.log(`  动态涨价建议: 成本${product.cost}, 退货率${maxRate}%, 需毛利${sg}, 当前毛利${currentGross.toFixed(0)}`);
-            }
+          const minGross = calcMinGross(product.cost, maxRate);
+          const currentGross = product.merchantIncome - product.cost;
+          if (minGross > currentGross) {
+            const sg = Math.ceil(minGross);
+            suggestedGrossText = `建议毛利${sg}元`;
+            console.log(`  动态涨价建议: 成本${product.cost}, 退货率${maxRate}%, 需毛利${sg}, 当前毛利${currentGross.toFixed(0)}`);
           }
         }
       } else if (orderNum >= 5 && product.cost !== undefined && product.cost !== null && product.merchantIncome) {
         // 5单以上，动态计算建议售价
-        const rd = maxRate / 100;
-        const fixedCost = SHIPPING_FEE + INSURANCE;
-        const denom = 0.964 - 0.994 * rd;
-        if (denom > 0) {
-          const minGross = (product.cost * (0.036 - 0.006 * rd) + fixedCost) / denom;
+        // 但如果平均每单利润已高于纯利3%，说明当前毛利已足够，不需要建议
+        const pureProfit3 = product.merchantIncome * 0.03;
+        if (avgProfitPerOrder > pureProfit3) {
+          console.log(`  跳过建议毛利: 平均每单利润${avgProfitPerOrder.toFixed(2)} > 纯利3%${pureProfit3.toFixed(2)}，当前毛利已足够`);
+        } else {
+          const minGross = calcMinGross(product.cost, maxRate);
           const currentGross = product.merchantIncome - product.cost;
           if (minGross > currentGross) {
             const sg = Math.ceil(minGross);
@@ -728,11 +810,11 @@ async function writeToFeishu(accessToken, products, shopName) {
         // 订单数3-5且两个退款率都不是100%
         recommendText = '推荐复制到其它店铺';
         console.log(`  等待人工操作追加: 推荐复制到其它店铺 (订单数${orderNum}, 列表退款率${listRate}%, 修正退款率${correctedRate}%)`);
-      } else if (!skipRecommend && orderNum >= 6 && orderNum <= 10 && maxRate < 85) {
+      } else if (!skipRecommend && orderNum >= 6 && orderNum <= 10 && maxRate < 0.85) {
         // 订单数6-10且最大退款率低于85%
         recommendText = '推荐复制到其它店铺';
         console.log(`  等待人工操作追加: 推荐复制到其它店铺 (订单数${orderNum}, 最大退款率${maxRate}%)`);
-      } else if (!skipRecommend && orderNum > 10 && maxRate < 70) {
+      } else if (!skipRecommend && orderNum > 10 && maxRate < 0.70) {
         // 订单数>10且最大退款率低于70%
         recommendText = '推荐复制到其它店铺';
         console.log(`  等待人工操作追加: 推荐复制到其它店铺 (订单数${orderNum}, 最大退款率${maxRate}%)`);
@@ -748,7 +830,7 @@ async function writeToFeishu(accessToken, products, shopName) {
       }
 
       // 订单数>15且满足"推荐复制到其它店铺"条件时，追加"建议裂变此商品"（不受skipRecommend影响）
-      if (orderNum > 15 && maxRate < 70) {
+      if (orderNum > 15 && maxRate < 0.70) {
         const append = '建议裂变此商品';
         if (fields['等待人工操作']) {
           fields['等待人工操作'] = fields['等待人工操作'] + '；' + append;
@@ -777,6 +859,7 @@ async function writeToFeishu(accessToken, products, shopName) {
         console.log(`  备注追加: 当前退货率${maxRate.toFixed(1)}%，毛利标准${Math.ceil(requiredGPFor5Profit)}`);
       }
       */
+    }
     }
 
     // 如果成本未找到，添加备注
@@ -868,6 +951,14 @@ async function writeToFeishu(accessToken, products, shopName) {
       const recordId = existingRecords.get(productIdStr);
       console.log(`更新 [${product.id}] 成交订单数:${product.orderCount} 退货率:${product.returnRate}...`);
 
+      // 获取现有记录的成本（如果新成本未获取到则使用旧成本）
+      const existingCost = recordCosts.get(recordId);
+      if ((product.cost === undefined || product.cost === null) && existingCost !== undefined && existingCost !== null) {
+        product.cost = existingCost;
+        fields['成本'] = Number(existingCost);
+        console.log(`  使用现有成本: ${existingCost}`);
+      }
+
       // 保留现有"已经干预"字段的值
       const existingIntervention = recordIntervention.get(recordId);
       if (existingIntervention) {
@@ -943,16 +1034,20 @@ async function writeToFeishu(accessToken, products, shopName) {
 }
 
 async function waitForQRCodeLogin(page) {
-  console.log('请使用抖音App扫码登录...');
-  console.log('等待扫码完成（超时10分钟）...');
+  process.stdout.write('请使用抖音App扫码登录...\n');
+  process.stdout.write('等待扫码完成（超时10分钟）...\n');
 
   try {
     await page.waitForFunction(() => {
       return window.location.href.includes('fxg.jinritemai.com/ffa/mshop/homepage');
     }, { timeout: 600000 });
-    console.log('登录成功！当前URL:', page.url());
+    const currentUrl = page.url();
+    process.stdout.write('登录成功！当前URL: ' + currentUrl + '\n');
+    return true;
   } catch (e) {
-    console.log('等待超时或页面跳转，当前URL:', page.url());
+    const currentUrl = page.url();
+    process.stdout.write('等待超时或页面跳转，当前URL: ' + currentUrl + '\n');
+    return false;
   }
 }
 
@@ -1266,7 +1361,32 @@ async function extractProductsOnPage(page) {
       }
     }
 
+    // 如果没找到商品表格，尝试找到最大的数据表格
     if (!productTable) {
+      console.log('未找到"商品信息"表格，尝试查找最大数据表格...');
+      let maxRows = 0;
+      for (const t of tables) {
+        const tbody = t.querySelector('tbody');
+        if (tbody) {
+          const rows = tbody.querySelectorAll('tr:not(.ecom-table-measure-row)');
+          if (rows.length > maxRows) {
+            // 检查是否包含ID或商品相关信息
+            const hasProducts = rows.some(row =>
+              row.innerText.includes('ID') ||
+              row.innerText.match(/\d{15,20}/) ||
+              row.innerText.includes('订单')
+            );
+            if (hasProducts) {
+              maxRows = rows.length;
+              productTable = t;
+            }
+          }
+        }
+      }
+    }
+
+    if (!productTable) {
+      console.log('未找到合适的商品表格');
       return { error: 'no_table', tablesFound: tables.length, products: [] };
     }
 
@@ -1278,10 +1398,38 @@ async function extractProductsOnPage(page) {
     }
     const rows = tbody.querySelectorAll('tr:not(.ecom-table-measure-row)');
 
-    // 固定列索引（从0开始）：0=序号, 1=商品信息(ID和名称), 2=近30天成交, 3=成交订单数, 4=退款率
-    const ID_COL = 1;
-    const ORDER_COL = 3;
-    const RATE_COL = 4;
+    // 动态检测列位置 - 从表头精确匹配
+    let ID_COL = 1;
+    let ORDER_COL = 3;
+    let RATE_COL = 4;
+
+    // 从 thead 获取表头信息
+    const thead = productTable.querySelector('thead');
+    if (thead && thead.rows.length > 0) {
+      const headerCells = thead.rows[0].querySelectorAll('th');
+      console.log(`表头有 ${headerCells.length} 列`);
+
+      for (let i = 0; i < headerCells.length; i++) {
+        const headerText = (headerCells[i].innerText || '').trim();
+        console.log(`  列${i}: "${headerText}"`);
+
+        // 匹配商品ID列
+        if (headerText.includes('商品ID') || headerText === 'ID') {
+          ID_COL = i;
+        }
+        // 匹配成交订单数列
+        if (headerText.includes('成交') || headerText.includes('订单数')) {
+          ORDER_COL = i;
+        }
+        // 匹配退款率列
+        if (headerText.includes('退款率') || headerText.includes('退货率')) {
+          RATE_COL = i;
+        }
+      }
+      console.log(`动态检测列位置: ID=${ID_COL}, 订单数=${ORDER_COL}, 退货率=${RATE_COL}`);
+    } else {
+      console.log('未找到表头，使用默认列位置');
+    }
 
     rows.forEach((row, idx) => {
       const rowText = row.innerText;
@@ -1294,30 +1442,61 @@ async function extractProductsOnPage(page) {
 
         const cells = row.querySelectorAll('td');
 
-        // 商品名称：cells[1]的第一行文字
+        // 商品名称：从ID列和订单列之外的列提取
         let productName = '';
-        if (cells.length > ID_COL) {
-          productName = cells[ID_COL].innerText.split('\n')[0].trim().substring(0, 50);
+        for (let i = 0; i < cells.length; i++) {
+          if (i !== ID_COL && i !== ORDER_COL && cells[i].innerText && !cells[i].innerText.includes('ID')) {
+            const text = cells[i].innerText.trim();
+            if (text && text.length > 1 && text.length < 100) {
+              productName = text.split('\n')[0].substring(0, 50);
+              break;
+            }
+          }
         }
 
-        // 成交订单数：cells[3]
+        // 成交订单数：从检测到的订单列精确提取
         let orderCount = 0;
-        if (cells.length > ORDER_COL) {
-          const cellText = cells[ORDER_COL].innerText || '';
+        if (cells[ORDER_COL]) {
+          const cellText = (cells[ORDER_COL].innerText || '').replace(/,/g, '');
           const match = cellText.match(/(\d+)/);
-          if (match) orderCount = parseInt(match[1]);
+          if (match) {
+            orderCount = parseInt(match[1]);
+          }
+        }
+        // 如果订单列没提取到，回退到搜索包含"单"的单元格
+        if (orderCount === 0) {
+          for (let i = 0; i < cells.length; i++) {
+            if (cells[i] && cells[i].innerText) {
+              const cellText = (cells[i].innerText || '').replace(/,/g, '');
+              const match = cellText.match(/(\d+)单/);
+              if (match) {
+                orderCount = parseInt(match[1]);
+                break;
+              }
+            }
+          }
         }
 
-        // 退款率：cells[4] — 必须是百分数格式（如 "82.53%"）
-        let returnRate = null;
-        if (cells.length > RATE_COL) {
+        // 退款率：从检测到的退货率列精确提取
+        let returnRate = -1;
+        if (cells[RATE_COL]) {
           const cellText = (cells[RATE_COL].innerText || '').trim();
           const match = cellText.match(/(\d+\.?\d*)%/);
           if (match) {
             returnRate = parseFloat(match[1]);
-          } else {
-            // 不是百分数格式，标记为无效
-            returnRate = -1;
+          }
+        }
+        // 如果退货率列没提取到，回退到搜索百分数
+        if (returnRate === -1) {
+          for (let i = 0; i < cells.length; i++) {
+            if (cells[i] && cells[i].innerText) {
+              const cellText = (cells[i].innerText || '').trim();
+              const match = cellText.match(/(\d+\.?\d*)%/);
+              if (match) {
+                returnRate = parseFloat(match[1]);
+                break;
+              }
+            }
           }
         }
 
@@ -1329,6 +1508,8 @@ async function extractProductsOnPage(page) {
           listReturnRate: returnRate,
           returnRate: returnRate
         });
+
+        console.log(`提取商品: ${id} - ${productName}, 订单数: ${orderCount}, 退款率: ${returnRate}%`);
       }
     });
 
@@ -1514,7 +1695,7 @@ async function extractProductData(page) {
         let returnRate = 0;
 
         if (cells.length > 4) {
-          const cell2Text = cells[2]?.innerText || '';
+          const cell2Text = (cells[2]?.innerText || '').replace(/,/g, '');
           const cell3Text = (cells[3]?.innerText || '').trim();
 
           const orderMatch = cell2Text.match(/(\d+)/);
@@ -1601,7 +1782,7 @@ async function extractProductData(page) {
 
         // cells[2]=成交订单数, cells[3]=退款率
         if (cells.length > 4) {
-          const cell2Text = cells[2]?.innerText || '';
+          const cell2Text = (cells[2]?.innerText || '').replace(/,/g, '');
           const cell3Text = (cells[3]?.innerText || '').trim();
 
           const orderMatch = cell2Text.match(/(\d+)/);
@@ -1654,13 +1835,57 @@ async function processProductRound(page, context, targetCount, accessToken, shop
 
   // Step 4: 点击"近30天"按钮
   console.log('\nStep 4: 点击"近30天"...');
+
+  // 增加页面稳定时间
+  console.log('等待页面完全稳定...');
+  await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
+  await sleep(5000);
+
+  // 尝试点击"近30天"按钮，使用多种策略
+  let clicked = false;
   try {
+    // 策略1: 尝试更长的超时时间
+    console.log('尝试点击"近30天"按钮（策略1）...');
     const thirtyDayBtn = page.locator('text=近30天').first();
-    await thirtyDayBtn.click({ timeout: 15000 });
+    await thirtyDayBtn.waitFor({ timeout: 20000 });
+    await thirtyDayBtn.click({ timeout: 20000 });
+    clicked = true;
     console.log('点击了"近30天"按钮');
-    await sleep(45000); // 等待数据加载
-  } catch (e) {
-    console.log('点击"近30天"失败:', e.message);
+  } catch (e1) {
+    console.log('策略1失败:', e1.message);
+    try {
+      // 策略2: 尝试不同的选择器
+      console.log('尝试点击"近30天"按钮（策略2）...');
+      const thirtyDayBtn2 = page.locator('button:has-text("近30天")').first();
+      await thirtyDayBtn2.waitFor({ timeout: 20000 });
+      await thirtyDayBtn2.click({ timeout: 20000 });
+      clicked = true;
+      console.log('策略2成功点击了"近30天"按钮');
+    } catch (e2) {
+      console.log('策略2也失败:', e2.message);
+      try {
+        // 策略3: 尝试点击下拉框或菜单项
+        console.log('尝试点击"近30天"按钮（策略3）...');
+        const thirtyDayBtn3 = page.locator('text=近30天').nth(1);
+        await thirtyDayBtn3.waitFor({ timeout: 20000 });
+        await thirtyDayBtn3.click({ timeout: 20000 });
+        clicked = true;
+        console.log('策略3成功点击了"近30天"按钮');
+      } catch (e3) {
+        console.log('策略3也失败:', e3.message);
+        console.log('点击"近30天"失败，将尝试直接提取数据...');
+      }
+    }
+  }
+
+  // 等待数据加载
+  if (clicked) {
+    console.log('等待数据加载...');
+    await sleep(60000); // 增加等待时间到60秒
+  } else {
+    // 如果点击失败，等待一段时间再尝试提取
+    console.log('等待页面稳定后尝试提取数据...');
+    await sleep(30000);
   }
 
   try {
@@ -1725,6 +1950,23 @@ async function processProductRound(page, context, targetCount, accessToken, shop
 
     // 处理商品 - 跳过已有记录的商品，尝试写入targetCount个商品
     console.log(`[循环开始] targetCount=${targetCount}, writeCount=${writeCount}, 当前页商品数=${productsWithOrders.length}`);
+
+    // 创建一个共享的订单页面，所有商品复用
+    let orderPage = null;
+    try {
+      orderPage = await context.newPage();
+      await orderPage.goto(CONFIG.douyin.orderListUrl, { waitUntil: 'networkidle', timeout: 120000 });
+      await orderPage.waitForTimeout(15000);
+      try {
+        await orderPage.locator('input[placeholder="请输入"]').first().waitFor({ state: 'visible', timeout: 10000 });
+        console.log('订单列表页面加载完成');
+      } catch (e) {
+        console.log('等待输入框超时:', e.message);
+      }
+    } catch (e) {
+      console.log('创建订单页面失败:', e.message);
+    }
+
     for (const product of productsWithOrders) {
       // 已达目标数量，停止处理
       if (writeCount >= targetCount) {
@@ -1738,11 +1980,71 @@ async function processProductRound(page, context, targetCount, accessToken, shop
         freshToken = await getFeishuToken();
       } catch (e) {}
 
-      // 先检查飞书表格中是否有48小时内的记录
+      // 先检查飞书表格中是否有近期记录
       const existingRecord = await checkRecentRecord(freshToken, product.id);
       if (existingRecord) {
-        console.log(`  跳过：48小时内已有记录`);
-        continue;  // 继续检查下一个商品，不计入
+        // 即使跳过抓取，也要检查成本是否更新
+        console.log(`  跳过抓取：近期已有记录，检查成本是否更新...`);
+        // 使用共享的订单页面查询成本
+        if (!orderPage || orderPage.isClosed()) {
+          console.log('  订单页面不可用，跳过成本检查');
+          continue;
+        }
+        try {
+          // 清空搜索框并填入商品ID - 第二个输入框是"商品名称/ID"
+          const input = orderPage.locator('input[placeholder="请输入"]').nth(1);
+          await input.click();
+          await input.fill(String(product.id));
+          await input.press('Enter');
+          await orderPage.waitForTimeout(10000);
+          // 获取商家编码
+          const costOrderData = await getOrderData(orderPage, CONFIG.douyin.orderListUrl);
+          if (costOrderData && costOrderData.merchantCode) {
+            const merchantCode = costOrderData.merchantCode;
+            console.log(`  商家编码: ${merchantCode}`);
+            // 查询成本
+            let newCost = null;
+            if (merchantCode.includes('+')) {
+              const parts = merchantCode.split('+');
+              const firstPrefix = parts[0].match(/^([a-zA-Z]+)/)[1];
+              let totalCost = 0;
+              let allFound = true;
+              for (const part of parts) {
+                const fullCode = /^[a-zA-Z]/.test(part) ? part : firstPrefix + part;
+                const partCost = await getCostFrom4thTable(freshToken, fullCode);
+                if (partCost !== null) totalCost += Number(partCost);
+                else allFound = false;
+              }
+              if (allFound) newCost = Number(totalCost.toFixed(2));
+            } else {
+              newCost = await getCostFrom4thTable(freshToken, merchantCode);
+            }
+            if (newCost !== null && newCost !== undefined) {
+              // 检查现有记录的成本是否需要更新
+              const baseUrl = `https://open.feishu.cn/open-apis/bitable/v1/apps/${CONFIG.feishu.app_token}/tables/${CONFIG.feishu.table_id}`;
+              const recUrl = `${baseUrl}/records?page_size=100&filter=CurrentValue.[商品id]="${product.id}"`;
+              const recRes = await fetch(recUrl, { headers: { 'Authorization': `Bearer ${freshToken}` } });
+              const recData = await recRes.json();
+              if (recData.data && recData.data.items && recData.data.items.length > 0) {
+                const rec = recData.data.items[0];
+                const oldCost = rec.fields['成本'];
+                if (oldCost !== newCost) {
+                  console.log(`  成本变化: ${oldCost} -> ${newCost}，更新记录`);
+                  await fetch(`${baseUrl}/records/${rec.id}`, {
+                    method: 'PUT',
+                    headers: { 'Authorization': `Bearer ${freshToken}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ fields: { '成本': Number(newCost) } })
+                  });
+                } else {
+                  console.log(`  成本无变化: ${newCost}`);
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.log(`  成本检查失败: ${e.message}`);
+        }
+        continue;
       }
 
       console.log(`  开始处理...`);
@@ -1760,23 +2062,12 @@ async function processProductRound(page, context, targetCount, accessToken, shop
         console.log('>> 修正退货率为空');
       }
 
-      // 进入订单列表页面获取商家编码、最新售价、商品图片
-      console.log('>> 进入订单列表页面...');
-      const orderPage = await context.newPage();
-      try {
-        await orderPage.goto(CONFIG.douyin.orderListUrl, { waitUntil: 'networkidle', timeout: 120000 });
-      await orderPage.waitForTimeout(15000);
-
-      // 等待输入框出现
-      try {
-        await orderPage.locator('input[placeholder="请输入"]').first().waitFor({ state: 'visible', timeout: 10000 });
-        console.log('订单列表页面加载完成');
-      } catch (e) {
-        console.log('等待输入框超时:', e.message);
+      // 使用共享的订单页面获取商家编码、最新售价、商品图片
+      console.log('>> 从订单列表获取数据...');
+      if (!orderPage || orderPage.isClosed()) {
+        console.log('  订单页面不可用，跳过');
+        continue;
       }
-
-      // 从订单列表获取商家编码、最新售价、商品图片
-      console.log(`  从订单列表获取数据...`);
       try {
         // 列出所有输入框和它们附近的文字
         const pageInfo = await orderPage.evaluate(() => {
@@ -1884,66 +2175,12 @@ async function processProductRound(page, context, targetCount, accessToken, shop
           }
           return { found: false, reason: labelRect ? '未找到输入框' : '未找到商品名称/ID标签' };
         }, product.id);
-        console.log(`  商品名称/ID旁输入框: ${JSON.stringify(inputResult)}`);
-
-        // 使用page.locator找到正确位置的输入框并填写
-        const allInputs = orderPage.locator('input');
-        const count = await allInputs.count();
-        console.log('  共找到', count, '个输入框');
-
-        // 遍历找nth(1)的输入框（y=547, left=880 - 商品名称/ID输入框）
-        let filled = false;
-        const input_locator = orderPage.locator('input[placeholder="请输入"]').nth(1);
-        try {
-          const box = await input_locator.boundingBox();
-          if (box) {
-            console.log('  找到目标输入框，位置:', JSON.stringify(box));
-            // 点击输入框获得焦点
-            await input_locator.click({ force: true });
-            await orderPage.waitForTimeout(200);
-            // 全选并删除现有内容
-            await orderPage.keyboard.press('Control+a');
-            await orderPage.keyboard.press('Backspace');
-            await orderPage.waitForTimeout(100);
-            // 使用page.keyboard.type逐字输入
-            await orderPage.keyboard.type(product.id, { delay: 50 });
-            console.log('  使用keyboard.type填写商品ID:', product.id);
-            await orderPage.waitForTimeout(300);
-
-            // 点击查询按钮
-            const queryBtn = orderPage.locator('button:has-text("查询")').first();
-            if (await queryBtn.count() > 0) {
-              await queryBtn.click({ force: true });
-              console.log('  点击查询按钮');
-            } else {
-              await orderPage.keyboard.press('Enter');
-              console.log('  按Enter键');
-            }
-            filled = true;
-          }
-        } catch (e) {
-          console.log('  输入失败:', e.message);
-        }
-
-        if (!filled) {
-          // 兜底：使用JavaScript
-          await orderPage.evaluate((pid) => {
-            const inputs = document.querySelectorAll('input');
-            for (const inp of inputs) {
-              const rect = inp.getBoundingClientRect();
-              if (Math.abs(rect.top - 547) < 5 && Math.abs(rect.left - 880) < 20) {
-                const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                nativeInputValueSetter.call(inp, pid);
-                inp.dispatchEvent(new Event('input', { bubbles: true }));
-                inp.focus();
-                inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-                inp.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-                return;
-              }
-            }
-          }, product.id);
-          console.log('  兜底使用JavaScript输入并按Enter');
-        }
+        // 使用可靠的方式搜索商品 - 第二个输入框是"商品名称/ID"
+        const input = orderPage.locator('input[placeholder="请输入"]').nth(1);
+        await input.click();
+        await input.fill(String(product.id));
+        await input.press('Enter');
+        console.log('  使用fill+Enter搜索商品ID:', product.id);
 
         // 等待搜索结果
         await orderPage.waitForTimeout(8000);
@@ -1952,54 +2189,68 @@ async function processProductRound(page, context, targetCount, accessToken, shop
         const orderData = await orderPage.evaluate((data) => {
           const { pid, pname } = data;
           const rows = document.querySelectorAll('tbody tr');
+
+          // 收集调试信息
+          const debugInfo = { rowCount: rows.length, pid, pname: pname?.substring(0, 20) };
+
           if (rows.length === 1 && rows[0].innerText.includes('暂无数据')) {
-            return { found: false, reason: 'no_data' };
+            return { found: false, reason: 'no_data', debug: debugInfo };
           }
 
-          // 优先用商品名称匹配（因为商品ID在订单列表中只显示为"商品单ID:xxx"）
-          const searchName = pname.length > 10 ? pname.substring(0, 20) : pname;
+          // 收集前3行的文本用于调试
+          const sampleRows = [];
+          for (let i = 0; i < Math.min(3, rows.length); i++) {
+            sampleRows.push(rows[i].innerText.substring(0, 200));
+          }
+          debugInfo.sampleRows = sampleRows;
 
+          // 遍历所有行，提取第一个有效订单的信息
           for (const row of rows) {
-            const rowText = row.innerText;
-            // 检查是否包含商品名称（截取前20字符避免精确匹配问题）
-            if (rowText.includes(searchName) || rowText.includes(pid)) {
-              const img = row.querySelector('img');
-              const rowText = row.innerText;
+            const rowText = row.innerText || '';
 
-              let merchantCode = '';
-              const codeMatch = rowText.match(/商家编码[：:]\s*(\S+)/);
-              if (codeMatch) merchantCode = codeMatch[1];
+            // 跳过空行或"暂无数据"
+            if (!rowText || rowText.includes('暂无数据')) continue;
 
-              let merchantIncome = '';
-              // 商家收入显示为 ¥107.90 格式（跟在订单金额后面的第二个¥金额）
-              const incomeMatch = rowText.match(/¥\s*([\d,]+\.?\d*)/g);
-              if (incomeMatch && incomeMatch.length >= 2) {
-                // 取第二个¥后面的金额（第一个是商品单价，第二个是商家收入）
-                merchantIncome = incomeMatch[1].replace(/[¥,\s]/g, '');
-              } else if (incomeMatch && incomeMatch.length === 1) {
-                merchantIncome = incomeMatch[0].replace(/[¥,\s]/g, '');
-              }
+            // 只要行里有¥符号就认为是有效订单行
+            if (!rowText.includes('¥')) continue;
 
+            const img = row.querySelector('img');
+
+            let merchantCode = '';
+            const codeMatch = rowText.match(/商家编码[：:]\s*(\S+)/);
+            if (codeMatch) merchantCode = codeMatch[1];
+
+            let merchantIncome = '';
+            const incomeMatch = rowText.match(/¥\s*([\d,]+\.?\d*)/g);
+            if (incomeMatch && incomeMatch.length >= 2) {
+              merchantIncome = incomeMatch[1].replace(/[¥,\s]/g, '');
+            } else if (incomeMatch && incomeMatch.length === 1) {
+              merchantIncome = incomeMatch[0].replace(/[¥,\s]/g, '');
+            }
+
+            // 找到第一个有金额的行就返回
+            if (merchantIncome || merchantCode) {
               return {
                 found: true,
                 imageUrl: img ? img.src : '',
                 merchantCode: merchantCode,
-                merchantIncome: merchantIncome
+                merchantIncome: merchantIncome,
+                debug: debugInfo
               };
             }
           }
-          return { found: false, reason: 'not_found' };
+          return { found: false, reason: 'not_found', debug: debugInfo };
         }, { pid: product.id, pname: product.name });
         console.log(`  订单数据: ${JSON.stringify(orderData)}`);
 
         if (orderData.found) {
           product.imageUrl = orderData.imageUrl || product.imageUrl;
-          // 处理商家编码：去掉中文和中文后面的所有内容，再去掉颜色/尺寸等后缀（-或_后面的内容）
+          // 处理商家编码：去掉中文描述，保留字母、数字、+
           let processedCode = orderData.merchantCode;
-          // 去掉中文和中文后面的所有内容
-          processedCode = processedCode.replace(/[一-龥].*$/, '');
           // 去掉连字符或下划线及其后面的所有内容（如 -XL, _XL, -浅蓝26 等）
           processedCode = processedCode.replace(/[-_].*$/, '');
+          // 去掉中文字符（保留数字和字母）
+          processedCode = processedCode.replace(/[一-龥]+/g, '');
           // 去掉所有剩余符号（保留字母、数字、+）
           processedCode = processedCode.replace(/[^a-zA-Z0-9+]/g, '');
           // 处理省略前缀的情况：+732 → 前缀+732（使用第一个编码的前缀）
@@ -2111,10 +2362,12 @@ async function processProductRound(page, context, targetCount, accessToken, shop
       } catch (e) {
         console.log(`  查询失败: ${e.message}`);
       }
-      } finally {
-        await orderPage.close();
-      }
       await sleep(2000);
+    }
+
+    // 关闭共享的订单页面
+    if (orderPage && !orderPage.isClosed()) {
+      try { await orderPage.close(); } catch {}
     }
 
     // 当前页处理完毕，检查是否需要翻页
@@ -2243,8 +2496,10 @@ async function main() {
     }
 
     // Step 1: 访问抖店登录页/首页
-    console.log('\nStep 1: 访问抖店首页...');
+    process.stdout.write('\nStep 1: 访问抖店首页...\n');
+    process.stdout.write('正在加载页面，请稍候...\n');
     await page.goto(CONFIG.douyin.loginUrl, { waitUntil: 'domcontentloaded', timeout: 120000 });
+    process.stdout.write('页面加载完成，等待5秒稳定...\n');
     await sleep(5000);
     await page.screenshot({ path: 'step1-homepage.png' });
 
@@ -2253,17 +2508,16 @@ async function main() {
     });
 
     if (!isLoggedIn) {
-      console.log('需要扫码登录...');
-      await waitForQRCodeLogin(page);
-      const currentUrl = page.url();
-      console.log('扫码后URL:', currentUrl);
-      loginSuccess = currentUrl.includes('fxg.jinritemai.com/ffa/mshop/homepage');
-      console.log('登录结果:', loginSuccess ? '成功' : '失败');
+      process.stdout.write('需要扫码登录...\n');
+      loginSuccess = await waitForQRCodeLogin(page);
       if (loginSuccess) {
         await saveCookiesToPath(context, cookiePath);
+        process.stdout.write('登录成功！\n');
+      } else {
+        process.stdout.write('登录失败！\n');
       }
     } else {
-      console.log('已检测到登录状态（Cookie有效）');
+      process.stdout.write('已检测到登录状态（Cookie有效）\n');
       loginSuccess = true;
     }
 
@@ -2286,11 +2540,12 @@ async function main() {
     await page.screenshot({ path: 'step1-after-login.png' });
 
     // Step 2: 进入电商罗盘
-    console.log('\nStep 2: 进入电商罗盘...');
+    process.stdout.write('\nStep 2: 进入电商罗盘...\n');
+    process.stdout.write('正在加载页面...\n');
     await page.goto('https://compass.jinritemai.com/shop', { waitUntil: 'domcontentloaded', timeout: 60000 });
-    console.log('等待30秒让页面稳定...');
+    process.stdout.write('页面加载完成，等待30秒稳定...\n');
     await sleep(30000);
-    console.log('当前URL:', page.url());
+    process.stdout.write('当前URL: ' + page.url() + '\n');
 
     // 获取店铺名称（页面右上角）
     console.log('\n获取店铺名称...');

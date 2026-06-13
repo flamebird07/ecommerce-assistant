@@ -3,7 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>票据管理</title>
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>票据管理 v2</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -390,6 +393,16 @@
             .form-row { flex-direction: column; align-items: flex-start; }
             .header h1 { font-size: 18px; }
         }
+
+        /* ===== 动画 ===== */
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        @keyframes slideOut {
+            from { transform: translateX(0); opacity: 1; }
+            to { transform: translateX(100%); opacity: 0; }
+        }
     </style>
 </head>
 <body>
@@ -403,7 +416,7 @@
         <div class="container">
             <div class="tabs">
                 <button class="tab-btn active" onclick="switchTab('bill', this)">票据管理</button>
-                <button class="tab-btn" onclick="switchTab('douyin', this)">抖店商品</button>
+                <button class="tab-btn" onclick="switchTab('douyin', this)">店铺商品分析</button>
                 <button class="tab-btn" onclick="switchTab('auto', this)">自动化处理</button>
             </div>
         </div>
@@ -424,6 +437,13 @@
                     <span class="form-label">图片目录</span>
                     <span id="currentDir" style="font-size:13px;color:#888;">加载中...</span>
                 </div>
+            </div>
+            <div class="log-area">
+                <pre id="log-bill">等待操作...</pre>
+            </div>
+            <div class="form-row" style="margin-top:8px;">
+                <button class="btn btn-warning btn-sm" onclick="loadAllLogs()">📋 查看全部历史日志</button>
+                <button class="btn btn-sm" onclick="clearCurrentLogs()" style="background:#eee;color:#666;">清空当前日志</button>
             </div>
         </div>
 
@@ -472,6 +492,7 @@
                     <span class="form-label">处理数量</span>
                     <input type="number" id="targetCount" value="1" min="1" class="form-input form-input-sm">
                     <button class="btn btn-warning" id="btn单次获取" onclick="runDouyinAnalyzer()">单次获取</button>
+                    <button class="btn btn-danger" id="btn停止分析" onclick="stopDouyinProcess()" disabled>停止</button>
                 </div>
                 <div class="form-row" style="margin-top: 12px;">
                     <span class="form-label">执行间隔</span>
@@ -497,6 +518,13 @@
                     <span class="form-label" style="min-width: 20px;">%</span>
                 </div>
             </div>
+            <div class="log-area">
+                <pre id="log-douyin">等待操作...</pre>
+            </div>
+            <div class="form-row" style="margin-top:8px;">
+                <button class="btn btn-warning btn-sm" onclick="loadAllLogs()">📋 查看全部历史日志</button>
+                <button class="btn btn-sm" onclick="clearCurrentLogs()" style="background:#eee;color:#666;">清空当前日志</button>
+            </div>
         </div>
 
         <!-- Tab 3: 自动化处理 -->
@@ -509,20 +537,26 @@
                 <div class="card-title">执行设置</div>
                 <div class="form-row">
                     <span class="form-label">单次处理</span>
-                    <input type="number" id="autoTargetCount" value="3" min="1" class="form-input form-input-sm">
+                    <input type="number" id="autoTargetCount" value="10" min="1" class="form-input form-input-sm">
                     <span class="form-label" style="min-width: 20px;">条</span>
                     <span class="form-label" style="margin-left: 12px;">间隔时间</span>
-                    <input type="number" id="autoIntervalMinutes" value="60" min="1" class="form-input form-input-sm">
+                    <input type="number" id="autoIntervalMinutes" min="1" class="form-input form-input-sm">
                     <span class="form-label" style="min-width: 30px;">分钟</span>
                     <button class="btn btn-primary" id="btnAutoStart" onclick="startAutoProcess()">启动自动化</button>
                     <button class="btn btn-danger" id="btnAutoStop" onclick="stopAutoProcess()" disabled>停止</button>
+                    <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin-left:16px;font-size:13px;color:#666;">
+                        <input type="checkbox" id="autoShutdownAfterAll"> 完成后自动关机
+                    </label>
+                    <button class="btn btn-sm" id="btnCancelShutdown" onclick="cancelShutdown()" style="background:#ff9800;color:#fff;margin-left:8px;display:none;" disabled>取消关机</button>
                 </div>
             </div>
-        </div>
-
-        <!-- Log Area -->
-        <div class="log-area">
-            <pre id="status">等待操作...</pre>
+            <div class="log-area">
+                <pre id="log-auto">等待操作...</pre>
+            </div>
+            <div class="form-row" style="margin-top:8px;">
+                <button class="btn btn-warning btn-sm" onclick="loadAllLogs()">📋 查看全部历史日志</button>
+                <button class="btn btn-sm" onclick="clearCurrentLogs()" style="background:#eee;color:#666;">清空当前日志</button>
+            </div>
         </div>
     </div>
 
@@ -531,6 +565,7 @@
         let isBillRunning = false;    // 票据录入/整理
         let isDouyinRunning = false;  // 抖店/拼多多商品获取
         let statusPolling = null;
+        let activeLogTab = 'bill';    // 当前日志应该写入哪个tab: bill | douyin | auto
         let selectedShop = '';
         let selectedPlatform = 'douyin'; // douyin | pinduoduo
         let dropdownOpen = false;
@@ -566,17 +601,16 @@
             return fetch(url, { ...opts, signal: c.signal }).finally(() => clearTimeout(t));
         }
 
-        // 日志追加
+        // 日志追加（写入当前运行任务对应的tab日志区域）
         function log(message, type = '') {
-            const el = document.getElementById('status');
+            const el = document.getElementById('log-' + activeLogTab);
             if (!el) return;
-            // 从消息中提取服务器时间戳 [2026-06-01T04:39:52.733Z]
             let time = '';
             const tsMatch = message.match(/^\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z)\]\s*/);
             if (tsMatch) {
                 try {
                     time = new Date(tsMatch[1]).toLocaleTimeString();
-                    message = message.substring(tsMatch[0].length); // 移除时间戳前缀
+                    message = message.substring(tsMatch[0].length);
                 } catch { time = new Date().toLocaleTimeString(); }
             } else {
                 time = new Date().toLocaleTimeString();
@@ -587,16 +621,28 @@
         }
 
         // ========== 状态轮询 ==========
+        // 追踪每个任务是否应该在下次检测到结束时处理
+        let pendingBillDone = false;
+        let pendingDouyinDone = false;
+
+        // 获取当前活动tab对应的日志端点
+        function getLogsEndpoint() {
+            return (activeLogTab === 'douyin' || activeLogTab === 'auto') ? '/get-douyin-logs' : '/get-logs';
+        }
+
+        // 已显示的日志条数（用于增量显示）
+        let lastProcessedLogCount = 0;
+
         function startStatusPolling() {
-            if (statusPolling) return; // 已有轮询则不重复启动
-            let lastLogSize = 0;
+            if (statusPolling) return;
+            lastProcessedLogCount = 0;
             statusPolling = setInterval(async () => {
                 try {
-                    // 拉日志
-                    const lr = await fetchWithTimeout('/get-logs');
+                    const lr = await fetchWithTimeout(getLogsEndpoint());
                     const ld = await lr.json();
-                    if (ld.logs && ld.logs.length > lastLogSize) {
-                        const newLogs = ld.logs.slice(lastLogSize);
+                    if (ld.logs && ld.logs.length > lastProcessedLogCount) {
+                        const newLogs = ld.logs.slice(lastProcessedLogCount);
+                        lastProcessedLogCount = ld.logs.length;
                         newLogs.forEach(msg => {
                             if (msg.includes('[错误]') || msg.includes('失败')) log(msg, 'error');
                             else if (msg.includes('完成') || msg.includes('成功')) log(msg, 'success');
@@ -608,23 +654,30 @@
                                 if (m) { if (selectedShop === m[1].trim()) selectShop(''); loadShops(); }
                             }
                         });
-                        lastLogSize = ld.logs.length;
                     }
-                    // 拉进程状态
+                } catch {}
+                // 拉进程状态（单独try-catch，不受日志拉取失败影响）
+                try {
                     const sr = await fetchWithTimeout('/get-process-status');
                     const sd = await sr.json();
                     if (!sd.running) {
-                        const wasRunning = isBillRunning || isDouyinRunning;
-                        if (isBillRunning) { isBillRunning = false; setBillButtons(false); }
-                        if (isDouyinRunning) { isDouyinRunning = false; setDouyinButtons(false); }
-                        if (!isBillRunning && !isDouyinRunning) {
-                            stopStatusPolling();
-                            // 自动关机
-                            if (wasRunning && document.getElementById('autoShutdown')?.checked) {
-                                log('任务完成，60秒后自动关机...', 'warning');
-                                fetchWithTimeout('/schedule-shutdown', { method: 'POST' }).catch(() => {});
+                        if (isBillRunning) { isBillRunning = false; setBillButtons(false); pendingBillDone = true; }
+                        if (isDouyinRunning) { isDouyinRunning = false; setDouyinButtons(false); pendingDouyinDone = true; }
+                    }
+                    // 两个任务都结束后，延迟停止轮询
+                    if (!isBillRunning && !isDouyinRunning && (pendingBillDone || pendingDouyinDone)) {
+                        setTimeout(() => {
+                            if (!isBillRunning && !isDouyinRunning) {
+                                stopStatusPolling();
+                                // 检查自动关机选项（无论是哪个页面勾选的）
+                                if (document.getElementById('autoShutdownAfterAll')?.checked || document.getElementById('autoShutdown')?.checked) {
+                                    log('任务完成，60秒后自动关机...', 'warning');
+                                    fetchWithTimeout('/schedule-shutdown', { method: 'POST' }).catch(() => {});
+                                }
                             }
-                        }
+                        }, 3000);
+                        pendingBillDone = false;
+                        pendingDouyinDone = false;
                     }
                 } catch {}
             }, 2000);
@@ -648,6 +701,8 @@
                 const el = document.getElementById(id);
                 if (el) el.disabled = running;
             });
+            const stopBtn = document.getElementById('btn停止分析');
+            if (stopBtn) stopBtn.disabled = !running;
             const trigger = document.getElementById('dropdownTrigger');
             if (trigger) {
                 if (running) { trigger.classList.add('disabled'); trigger.style.cursor = 'not-allowed'; trigger.style.background = '#f5f5f5'; }
@@ -663,6 +718,7 @@
         // ========== 启动任务 ==========
         async function startBillTask(url, body, logMsg) {
             if (isBillRunning) return;
+            activeLogTab = 'bill';
             isBillRunning = true;
             setBillButtons(true);
             log(logMsg, 'info');
@@ -677,6 +733,7 @@
 
         async function startDouyinTask(url, body, logMsg) {
             if (isDouyinRunning) return;
+            activeLogTab = 'douyin';
             isDouyinRunning = true;
             setDouyinButtons(true);
             log(logMsg, 'info');
@@ -710,7 +767,109 @@
             } catch (e) { log('停止请求失败: ' + e.message, 'error'); }
             isBillRunning = false; setBillButtons(false);
             isDouyinRunning = false; setDouyinButtons(false);
+            pendingBillDone = false; pendingDouyinDone = false;
             stopStatusPolling();
+        }
+
+        async function stopDouyinProcess() {
+            if (!isDouyinRunning) return;
+            log('正在停止抓取...', 'warning');
+            try {
+                const res = await fetchWithTimeout('/stop-process', { method: 'POST' });
+                const r = await res.json();
+                log(r.success ? '已停止进程' : '停止失败: ' + r.message, r.success ? 'success' : 'error');
+            } catch (e) { log('停止请求失败: ' + e.message, 'error'); }
+            isDouyinRunning = false; setDouyinButtons(false);
+            pendingDouyinDone = false;
+            if (!isBillRunning) stopStatusPolling();
+        }
+
+        // ========== 配置管理 ==========
+        // 保存费用配置
+        function saveFeeConfig() {
+            const config = {
+                shippingFee: document.getElementById('shippingFee').value,
+                insurance: document.getElementById('insurance').value,
+                platformFee: document.getElementById('platformFee').value
+            };
+            localStorage.setItem('feeConfig', JSON.stringify(config));
+        }
+
+        // 加载费用配置
+        function loadFeeConfig() {
+            try {
+                const saved = localStorage.getItem('feeConfig');
+                if (saved) {
+                    const config = JSON.parse(saved);
+                    // 设置所有页面的费用值
+                    const feeInputs = ['shippingFee', 'insurance', 'platformFee'];
+                    feeInputs.forEach(id => {
+                        const els = document.querySelectorAll(`[id="${id}"]`);
+                        els.forEach(el => {
+                            el.value = config[id] || (id === 'shippingFee' ? 2.1 : id === 'insurance' ? 4.01 : 0.6);
+                        });
+                    });
+                }
+            } catch (e) {
+                console.error('loadFeeConfig error:', e);
+            }
+        }
+
+        // 保存费用配置到本地存储
+        function setupFeeConfigListeners() {
+            ['shippingFee', 'insurance', 'platformFee'].forEach(id => {
+                const els = document.querySelectorAll(`[id="${id}"]`);
+                els.forEach(el => {
+                    el.addEventListener('change', function() {
+                        saveFeeConfig();
+                        showFeeSaved();
+                    });
+                    el.addEventListener('blur', function() {
+                        saveFeeConfig();
+                        showFeeSaved();
+                    });
+                });
+            });
+        }
+
+        // 监听所有输入框的变化（实时保存）
+        document.addEventListener('input', function(e) {
+            if (e.target.id && ['shippingFee', 'insurance', 'platformFee'].includes(e.target.id)) {
+                // 延迟保存，避免频繁操作
+                clearTimeout(window.feeSaveTimeout);
+                window.feeSaveTimeout = setTimeout(saveFeeConfig, 1000);
+            }
+        });
+
+        // 显示费用已保存提示
+        function showFeeSaved() {
+            // 移除之前的提示
+            const existingTip = document.querySelector('.fee-saved-tip');
+            if (existingTip) existingTip.remove();
+
+            // 创建新提示
+            const tip = document.createElement('div');
+            tip.className = 'fee-saved-tip';
+            tip.style.cssText = `
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                background: #52c41a;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 6px;
+                font-size: 13px;
+                z-index: 9999;
+                animation: slideIn 0.3s ease;
+            `;
+            tip.textContent = '✓ 费用设置已保存';
+            document.body.appendChild(tip);
+
+            // 3秒后移除
+            setTimeout(() => {
+                tip.style.animation = 'slideOut 0.3s ease';
+                setTimeout(() => tip.remove(), 300);
+            }, 3000);
         }
 
         // ========== 目录配置 ==========
@@ -720,7 +879,10 @@
                 const data = await res.json();
                 document.getElementById('currentDir').textContent = data.dir || '未设置';
                 document.getElementById('dirInput').value = data.dir || '';
-            } catch { document.getElementById('currentDir').textContent = '未设置'; }
+            } catch (e) {
+                console.error('loadDirConfig error:', e);
+                document.getElementById('currentDir').textContent = '未设置';
+            }
         }
         function openDirConfig() { document.getElementById('dirModal').style.display = 'flex'; }
         function closeDirConfig() { document.getElementById('dirModal').style.display = 'none'; }
@@ -740,6 +902,8 @@
             btn.classList.add('active');
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
             document.getElementById('tab-' + tabName).classList.add('active');
+            // 设置当前活动tab
+            activeLogTab = tabName;
         }
 
         // ========== 店铺管理 ==========
@@ -760,12 +924,15 @@
         async function deleteShop(event, shop) {
             event.stopPropagation();
             if (!confirm(`确定要删除店铺"${shop}"吗？`)) return;
+            const prevTab = activeLogTab;
+            activeLogTab = 'douyin';  // 删除店铺日志显示在店铺商品分析tab
             try {
                 const res = await fetchWithTimeout('/remove-shop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ shopName: shop }) });
                 const r = await res.json();
                 if (r.success) { log('已删除店铺: ' + shop, 'success'); if (selectedShop === shop) selectShop(''); loadShops(); }
                 else log('删除店铺失败', 'error');
             } catch (e) { log('删除请求失败: ' + e.message, 'error'); }
+            activeLogTab = prevTab;  // 恢复之前的tab
         }
         function renderDropdownItems() {
             const menu = document.getElementById('dropdownMenu');
@@ -785,11 +952,22 @@
                 const res = await fetchWithTimeout(getShopsEndpoint());
                 const data = await res.json();
                 shopsData = data.shops || [];
-                renderDropdownItems(); renderAutoShopList();
-            } catch {}
+                renderDropdownItems();
+                // 更新自动化店铺列表（保留已有配置，添加新店铺）
+                const currentPlatform = selectedPlatform;
+                shopsData.forEach(shop => {
+                    if (!autoShopConfigs.find(c => c.shopName === shop && c.platform === currentPlatform)) {
+                        autoShopConfigs.push({ shopName: shop, platform: currentPlatform });
+                    }
+                });
+                renderAutoShopList();
+            } catch (e) {
+                console.error('loadShops error:', e);
+            }
         }
         async function loginNewShop() {
             if (isDouyinRunning) return;
+            activeLogTab = 'douyin';  // 登录操作日志显示在店铺商品分析tab
             isDouyinRunning = true; setDouyinButtons(true);
             const platformName = selectedPlatform === 'pinduoduo' ? '拼多多' : '抖店';
             log(`开始登录新${platformName}店铺，请在弹出的浏览器中扫码登录...`, 'info');
@@ -827,80 +1005,327 @@
         }
 
         // ========== 自动化处理 ==========
+
         function renderAutoShopList() {
             const container = document.getElementById('autoShopList');
             container.innerHTML = '';
-            if (shopsData.length === 0) { container.innerHTML = '<span style="color:#999;font-size:14px;">暂无店铺，请先登录账号</span>'; return; }
-            if (autoShopConfigs.length === 0) autoShopConfigs = shopsData.map(s => ({ shopName: s, targetCount: 3 }));
-            else {
-                autoShopConfigs = autoShopConfigs.filter(c => shopsData.includes(c.shopName));
-                shopsData.forEach(s => { if (!autoShopConfigs.find(c => c.shopName === s)) autoShopConfigs.push({ shopName: s, targetCount: 3 }); });
-            }
-            let html = '<table class="auto-table"><thead><tr><th>店铺名称</th><th style="width:100px;text-align:center;">每日抓取</th><th style="width:90px;text-align:center;">顺序</th><th style="width:70px;text-align:center;">操作</th></tr></thead><tbody>';
+            if (autoShopConfigs.length === 0) { container.innerHTML = '<span style="color:#999;font-size:14px;">暂无店铺配置，请在抖店商品页面添加店铺</span>'; return; }
+            let html = '<table class="auto-table"><thead><tr><th>店铺名称</th><th style="width:80px;text-align:center;">平台</th><th style="width:90px;text-align:center;">顺序</th><th style="width:70px;text-align:center;">操作</th></tr></thead><tbody>';
             autoShopConfigs.forEach((c, i) => {
-                html += `<tr><td>${c.shopName}</td><td style="text-align:center;"><input type="number" class="auto-target-count" data-shop="${c.shopName}" value="${c.targetCount}" min="1" style="width:60px;padding:5px 8px;font-size:13px;border:1px solid #d9d9d9;border-radius:6px;text-align:center;"></td><td style="text-align:center;"><button class="btn-order" onclick="moveAutoShopUp(${i})" ${i===0?'disabled':''}>&uarr;</button> <button class="btn-order" onclick="moveAutoShopDown(${i})" ${i===autoShopConfigs.length-1?'disabled':''}>&darr;</button></td><td style="text-align:center;"><button class="btn-remove" onclick="removeAutoShop('${c.shopName}')">删除</button></td></tr>`;
+                const platformLabel = c.platform === 'pinduoduo' ? '拼多多' : '抖店';
+                html += `<tr><td>${c.shopName}</td><td style="text-align:center;font-size:13px;color:#666;">${platformLabel}</td><td style="text-align:center;"><button class="btn-order" onclick="moveAutoShopUp(${i})" ${i===0?'disabled':''}>&uarr;</button> <button class="btn-order" onclick="moveAutoShopDown(${i})" ${i===autoShopConfigs.length-1?'disabled':''}>&darr;</button></td><td style="text-align:center;"><button class="btn-remove" onclick="removeAutoShop(${i})">删除</button></td></tr>`;
             });
             html += '</tbody></table>';
             container.innerHTML = html;
         }
-        function removeAutoShop(name) { autoShopConfigs = autoShopConfigs.filter(c => c.shopName !== name); renderAutoShopList(); }
+
+        function removeAutoShop(index) { autoShopConfigs.splice(index, 1); renderAutoShopList(); }
         function moveAutoShopUp(i) { if (i <= 0) return; [autoShopConfigs[i], autoShopConfigs[i-1]] = [autoShopConfigs[i-1], autoShopConfigs[i]]; renderAutoShopList(); }
         function moveAutoShopDown(i) { if (i >= autoShopConfigs.length - 1) return; [autoShopConfigs[i], autoShopConfigs[i+1]] = [autoShopConfigs[i+1], autoShopConfigs[i]]; renderAutoShopList(); }
+
         async function startAutoProcess() {
             if (autoRunning) return;
-            if (shopsData.length === 0) { log('没有可执行的店铺', 'warning'); return; }
-            const inputs = document.querySelectorAll('.auto-target-count');
-            autoShopConfigs = [];
-            inputs.forEach(inp => autoShopConfigs.push({ shopName: inp.dataset.shop, targetCount: parseInt(inp.value) || 1 }));
+            activeLogTab = 'auto';
             if (autoShopConfigs.length === 0) { log('没有可执行的店铺', 'warning'); return; }
-            const interval = parseInt(document.getElementById('autoIntervalMinutes').value) || 60;
-            log(`启动自动化，共${autoShopConfigs.length}个店铺，间隔${interval}分钟`, 'info');
+            const targetCount = parseInt(document.getElementById('autoTargetCount').value) || 10;
+            const interval = parseInt(document.getElementById('autoIntervalMinutes').value) || 30;
+            const sf = parseFloat(document.getElementById('shippingFee').value) || 2.1;
+            const ins = parseFloat(document.getElementById('insurance').value) || 4.01;
+            const pf = parseFloat(document.getElementById('platformFee').value) || 0.6;
+
             autoRunning = true;
             document.getElementById('btnAutoStart').disabled = true;
             document.getElementById('btnAutoStop').disabled = false;
-            await runAutoRound();
-            if (autoRunning) log('[自动化] 本轮执行完毕', 'info');
+            log(`[自动化] 启动，${autoShopConfigs.length}个店铺轮流执行，每轮${targetCount}条，间隔${interval}分钟`, 'info');
+
+            // 记录每个店铺是否已结束
+            const finishedShops = new Set();
+            let round = 1;
+
+            while (autoRunning) {
+                // 过滤掉已结束的店铺
+                const activeShops = autoShopConfigs.filter((_, i) => !finishedShops.has(i));
+                if (activeShops.length === 0) {
+                    log('[自动化] 所有店铺已终止，自动化流程完成', 'success');
+                    break;
+                }
+
+                log(`[自动化] === 第${round}轮，${activeShops.length}个店铺 ===`, 'info');
+
+                for (let idx = 0; idx < autoShopConfigs.length && autoRunning; idx++) {
+                    if (finishedShops.has(idx)) continue;
+                    const c = autoShopConfigs[idx];
+                    const endpoint = c.platform === 'pinduoduo' ? '/run-pdd-analyzer' : '/run-douyin-analyzer';
+                    const startTime = new Date();
+                    log(`[自动化] ${c.shopName}: 开始处理 ${targetCount} 条`, 'info');
+
+                    // 启动日志轮询
+                    startStatusPolling();
+
+                    // 执行抓取
+                    let success = false;
+                    let shouldWaitForProcess = true;
+                    try {
+                        const res = await fetchWithTimeout(endpoint, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ targetCount, shopName: c.shopName, shippingFee: sf, insurance: ins, platformFee: pf })
+                        }, 300000); // 减少超时时间到5分钟
+                        const r = await res.json();
+                        success = r.success;
+                        if (!r.success) {
+                            log(`[自动化] ${c.shopName}: 失败: ${r.message}`, 'error');
+                            // 如果是登录相关错误，立即标记为结束，不等待进程
+                            if (r.message && (r.message.includes('登录') || r.message.includes('Cookie') || r.message.includes('扫码'))) {
+                                shouldWaitForProcess = false;
+                                finishedShops.add(idx);
+                                log(`[自动化] ${c.shopName}: 登录失败，店铺终止`, 'warning');
+                            }
+                        }
+                    } catch (e) {
+                        log(`[自动化] ${c.shopName}: 请求失败: ${e.message}`, 'error');
+                        // 网络错误也立即结束，不等待
+                        shouldWaitForProcess = false;
+                        finishedShops.add(idx);
+                    }
+
+                    // 等待进程结束（只在需要时等待）
+                    if (autoRunning && success && shouldWaitForProcess) {
+                        let waitCount = 0;
+                        while (autoRunning && waitCount < 20) { // 最多等待60秒
+                            try {
+                                const sr = await fetchWithTimeout('/get-process-status');
+                                const sd = await sr.json();
+                                if (!sd.running) break;
+                            } catch {}
+                            await new Promise(r => setTimeout(r, 3000));
+                            waitCount++;
+                        }
+                    }
+
+                    const endTime = new Date();
+                    const elapsed = Math.round((endTime - startTime) / 1000);
+                    const timeStr = endTime.toLocaleTimeString();
+                    const elapsedMin = Math.floor(elapsed / 60);
+                    const elapsedSec = elapsed % 60;
+                    const elapsedStr = elapsedMin > 0 ? `${elapsedMin}分${elapsedSec}秒` : `${elapsedSec}秒`;
+                    log(`[自动化] ${c.shopName}: 本批次完成，耗时${elapsedStr}，完成时间 ${timeStr}`, 'success');
+
+                    // 检查是否触发结束条件
+                    if (success) {
+                        try {
+                            const logRes = await fetchWithTimeout('/get-douyin-logs');
+                            const logData = await logRes.json();
+                            const recentLogs = (logData.logs || []).slice(-30).join(' '); // 增加到30条
+
+                            // 检查登录过期（只检测明确的过期标记）
+                            const hasExpiredMarker = recentLogs.includes('COOKIE_EXPIRED:' + c.shopName) &&
+                                                   recentLogs.includes('Cookie文件不存在');
+                            const hasLoginError = recentLogs.includes('登录未成功') &&
+                                                 recentLogs.includes('需要扫码登录') &&
+                                                 !recentLogs.includes('登录成功！');
+
+                            // 只有同时满足登录失败和Cookie文件不存在才认为真的过期
+                            if (hasExpiredMarker || hasLoginError) {
+                                log(`[自动化] ${c.shopName}: 检测到登录过期，自动移除店铺`, 'warning');
+                                // 自动删除店铺配置
+                                autoShopConfigs.splice(idx, 1);
+                                finishedShops.add(idx);
+                                // 更新界面显示
+                                renderAutoShopList();
+                            }
+                            // 检查无新数据（多次写入0条才认为无新数据）
+                            else if (recentLogs.includes('已写入0/') && recentLogs.includes('遇到0单')) {
+                                finishedShops.add(idx);
+                                log(`[自动化] ${c.shopName}: 本轮无新数据，店铺终止`, 'info');
+                            } else {
+                                // 成功完成
+                                finishedShops.add(idx);
+                                log(`[自动化] ${c.shopName}: 成功完成`, 'success');
+                            }
+                        } catch (e) {
+                            console.error('检查日志失败:', e);
+                            // 安全起见，不删除店铺
+                            log(`[自动化] ${c.shopName}: 日志检查出错，保留店铺在下轮处理`, 'warning');
+                        }
+                    } else {
+                        // 请求失败也标记结束，避免反复重试
+                        finishedShops.add(idx);
+                    }
+
+                    // 等待间隔时间（最后一个店铺不等待）
+                    const isLastShop = idx === autoShopConfigs.length - 1 || autoShopConfigs.filter((_, i) => !finishedShops.has(i) && i > idx).length === 0;
+                    if (autoRunning && !isLastShop) {
+                        const nextTime = new Date(Date.now() + interval * 60000);
+                        log(`[自动化] 等待${interval}分钟，下一轮开始时间 ${nextTime.toLocaleTimeString()}`, 'info');
+                        const waitEnd = Date.now() + interval * 60000;
+                        while (autoRunning && Date.now() < waitEnd) {
+                            await new Promise(r => setTimeout(r, Math.min(10000, waitEnd - Date.now())));
+                        }
+                    }
+                }
+                round++;
+            }
+
+            if (autoRunning) {
+                log('[自动化] 全部完成', 'success');
+                // 所有店铺都终止，触发自动关机
+                if (document.getElementById('autoShutdownAfterAll')?.checked) {
+                    log('[自动化] 60秒后自动关机...', 'warning');
+                    try { await fetchWithTimeout('/schedule-shutdown', { method: 'POST' }); } catch {}
+                }
+            }
             autoRunning = false;
             document.getElementById('btnAutoStart').disabled = false;
             document.getElementById('btnAutoStop').disabled = true;
         }
-        async function runAutoRound() {
-            if (!autoRunning) return;
-            const batch = parseInt(document.getElementById('autoTargetCount').value) || 3;
-            const interval = parseInt(document.getElementById('autoIntervalMinutes').value) || 60;
-            for (let i = 0; i < autoShopConfigs.length; i++) {
-                if (!autoRunning) break;
-                const c = autoShopConfigs[i];
-                let processed = 0;
-                while (processed < c.targetCount && autoRunning) {
-                    const thisBatch = Math.min(batch, c.targetCount - processed);
-                    log(`[自动化] ${c.shopName}: 处理 ${processed+1}-${processed+thisBatch} / ${c.targetCount}`, 'info');
-                    const sf = parseFloat(document.getElementById('shippingFee').value) || 2.1;
-                    const ins = parseFloat(document.getElementById('insurance').value) || 4.01;
-                    const pf = parseFloat(document.getElementById('platformFee').value) || 0.6;
-                    try {
-                        const res = await fetchWithTimeout('/run-douyin-analyzer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ targetCount: thisBatch, shopName: c.shopName, shippingFee: sf, insurance: ins, platformFee: pf }) });
-                        const r = await res.json();
-                        log(r.success ? `[自动化] ${c.shopName}: ${processed+thisBatch}/${c.targetCount} 完成` : `[自动化] ${c.shopName}: 失败: ${r.message}`, r.success ? 'success' : 'error');
-                    } catch (e) { log(`[自动化] ${c.shopName}: 请求失败: ${e.message}`, 'error'); }
-                    processed += thisBatch;
-                    if (processed < c.targetCount && autoRunning) { log(`[自动化] ${c.shopName}: 等待${interval}分钟...`, 'info'); await new Promise(r => setTimeout(r, interval * 60000)); }
-                }
-                if (autoRunning && i < autoShopConfigs.length - 1) { log(`[自动化] 切换下一个店铺，等待${interval}分钟...`, 'info'); await new Promise(r => setTimeout(r, interval * 60000)); }
-            }
-        }
+
         function stopAutoProcess() {
             if (!autoRunning) return;
             log('正在停止自动化...', 'warning');
             autoRunning = false;
+
+            // 停止正在运行的进程
+            fetchWithTimeout('/stop-process', { method: 'POST' }).catch(() => {});
+
+            // 如果设置了自动关机，取消关机
+            if (document.getElementById('autoShutdownAfterAll')?.checked) {
+                log('检测到已设置自动关机，正在取消...', 'info');
+                fetchWithTimeout('/cancel-shutdown', { method: 'POST' }).catch(() => {});
+                log('已取消自动关机', 'success');
+            }
+
             document.getElementById('btnAutoStart').disabled = false;
             document.getElementById('btnAutoStop').disabled = true;
             log('自动化已停止', 'success');
         }
 
+        // ========== 日志管理 ==========
+        async function loadAllLogs() {
+            // 先切换到当前活动的tab
+            const currentTab = activeLogTab;
+
+            const endpoint = getLogsEndpoint();
+            log(`正在加载历史日志... (类型: ${currentTab})`, 'info');
+
+            try {
+                // 查询所有历史日志（不限制时间）
+                const res = await fetchWithTimeout(endpoint + '?hours=168&lines=5000'); // 7天历史，最多5000行
+                const data = await res.json();
+
+                const el = document.getElementById('log-' + currentTab);
+                if (el) {
+                    el.innerHTML = '';
+                    const logs = data.logs || [];
+
+                    if (logs.length === 0) {
+                        el.innerHTML = '没有找到历史日志';
+                        log('没有找到历史日志', 'warning');
+                        return;
+                    }
+
+                    logs.forEach(msg => {
+                        let time = '';
+                        const tsMatch = msg.match(/^\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z)\]\s*/);
+                        if (tsMatch) {
+                            try {
+                                time = new Date(tsMatch[1]).toLocaleTimeString();
+                                msg = msg.substring(tsMatch[0].length);
+                            } catch { time = new Date().toLocaleTimeString(); }
+                        } else {
+                            time = new Date().toLocaleTimeString();
+                        }
+
+                        // 添加日志样式
+                        let className = '';
+                        let content = `[${time}] ${msg}`;
+
+                        if (msg.includes('[错误]') || msg.includes('失败')) {
+                            className = 'error';
+                            content = `<span class="${className}">[ERROR] ${content}</span>`;
+                        } else if (msg.includes('完成') || msg.includes('成功')) {
+                            className = 'success';
+                            content = `<span class="${className}">[SUCCESS] ${content}</span>`;
+                        } else if (msg.includes('自动化') || msg.includes('启动') || msg.includes('停止')) {
+                            className = 'info';
+                            content = `<span class="${className}">[INFO] ${content}</span>`;
+                        } else {
+                            content = `<span>${content}</span>`;
+                        }
+
+                        el.innerHTML += content + '\n';
+                    });
+
+                    // 滚动到底部
+                    el.parentElement.scrollTop = el.parentElement.scrollHeight;
+                    log(`已加载 ${logs.length} 条历史日志`, 'success');
+                } else {
+                    log(`找不到日志元素: log-${currentTab}`, 'error');
+                }
+            } catch (e) {
+                log('加载历史日志失败: ' + e.message, 'error');
+                console.error('详细错误:', e);
+            }
+        }
+
+        function clearCurrentLogs() {
+            const el = document.getElementById('log-' + activeLogTab);
+            if (el) {
+                el.innerHTML = '日志已清空...';
+                log('当前日志已清空');
+            }
+        }
+
+        // ========== 关机管理 ==========
+        let shutdownScheduled = false;
+
+        async function checkShutdownStatus() {
+            try {
+                const res = await fetchWithTimeout('/check-shutdown');
+                const data = await res.json();
+                shutdownScheduled = data.shutdownScheduled || false;
+
+                // 更新取消关机按钮状态
+                const btnCancel = document.getElementById('btnCancelShutdown');
+                if (btnCancel) {
+                    btnCancel.style.display = shutdownScheduled ? 'inline-block' : 'none';
+                    btnCancel.disabled = !shutdownScheduled;
+                }
+
+                if (shutdownScheduled) {
+                    log(`⚠️ 已安排关机：${data.shutdownTime || '60秒后'}`, 'warning');
+                }
+            } catch (e) {
+                // 静默失败，不显示错误
+            }
+        }
+
+        async function cancelShutdown() {
+            try {
+                await fetchWithTimeout('/cancel-shutdown', { method: 'POST' });
+                shutdownScheduled = false;
+                log('已取消自动关机', 'success');
+
+                // 更新按钮状态
+                const btnCancel = document.getElementById('btnCancelShutdown');
+                if (btnCancel) {
+                    btnCancel.style.display = 'none';
+                    btnCancel.disabled = true;
+                }
+            } catch (e) {
+                log('取消关机失败: ' + e.message, 'error');
+            }
+        }
+
         // ========== 初始化 ==========
+        document.getElementById('autoIntervalMinutes').value = Math.floor(Math.random() * 11) + 5;
+        loadFeeConfig();  // 先加载费用配置
+        setupFeeConfigListeners();  // 设置费用配置监听器
         loadDirConfig();
         loadShops();
+
+        // 定期检查关机状态（禁用，避免频繁调用）
+        // setInterval(checkShutdownStatus, 30000); // 每30秒检查一次
     </script>
 </body>
 </html>

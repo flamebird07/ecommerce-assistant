@@ -26,8 +26,9 @@ const LOCK_FILE = path.join(__dirname, 'arrange2.lock');
 
 function isProcessRunning(pid) {
     try {
-        const r = execSync(`tasklist //FI "PID eq ${pid}" //NH`, { encoding: 'utf-8', timeout: 3000 });
-        return r.includes(String(pid));
+        // 使用 process.kill(pid, 0) 检查进程是否存在，不依赖tasklist的编码
+        process.kill(pid, 0);
+        return true;
     } catch { return false; }
 }
 
@@ -247,7 +248,11 @@ function getRecordTime() {
 // 将1号表格的某条记录同步到2号表格
 async function syncRecordToDstTable(srcRecord, recordIndex) {
     const f = srcRecord.fields;
-    const shop = getText(f['档口名称']).trim();
+    let shop = getText(f['档口名称']).trim();
+    // 特例：婉星 -> 婉星儿（和write_final.js保持一致）
+    if (shop === '婉星') shop = '婉星儿';
+    if (shop === '梦莎娜熙恒') shop = '梦莎娜';
+    if (shop === '喜梦露') shop = '荷传';
     const batch = getText(f['批次号']).trim();
     // 单据打印时间为空时，用记录时间作fallback，避免被错误跳过
     const srcTime = f['单据打印时间'] || f['记录时间'] || 0;
@@ -284,6 +289,8 @@ async function syncRecordToDstTable(srcRecord, recordIndex) {
         '地址': getText(f['地址']),
         '单据内容': getText(f['单据内容']),
         '客户': getText(f['客户']),
+        '拿货件数': toNum2(f['拿货件数']),
+        '退货件数': toNum2(f['退货件数']),
         '记录时间': Date.now()
     };
 
@@ -551,6 +558,8 @@ function extractGoodsCost(text, shopAbbr) {
         }
 
         if (dataStarted) {
+            // 跳过Markdown章节标题（如"3. 核销记录"、"4. 结余统计"）
+            if (/^\d+\.\s/.test(line.trim())) continue;
             // 跳过非数据行关键词
             const skipKeywords = ['序号', '客户', '电话', '地址', '经办人', '店员', '批次', '日期', '总额', '销数', '退数', '微信', '支付宝', '银行', '账号', '农行', '交行', '手机', '提醒', '版本', '入库', 'QR', '扫码', '发生日期', '类型', '本次核销', '上次结余', '本单结余', '累计结余', '本单额', '本单余', '累计余', '抵扣', '欠款', '总数', '实付', '应收', '开单', '退货', '数量', '款数', '数量:', '款数:'];
             if (skipKeywords.some(k => line.includes(k))) continue;
@@ -635,21 +644,38 @@ function extractGoodsCost(text, shopAbbr) {
                 codeStr = codeStr.replace(/[a-zA-Z]+$/, '');  // 8526jh → 8526
             }
             codeStr = codeStr.replace(/[－—]/g, '-');
-            // 去掉末尾的符号（-、/、_等）
-            codeStr = codeStr.replace(/[-\/_]+$/, '');
+            // 去掉末尾的符号（-、/、_、.等）
+            codeStr = codeStr.replace(/[-\/_.]+$/, '');
+            // 跳过日期格式的款号（如2026-05-30）
+            if (/^\d{4}-\d{2}-\d{2}$/.test(codeStr)) {
+                console.log(`  [4号] 跳过日期格式: ${codeStr}`);
+                continue;
+            }
+            // 跳过过短的款号（少于2个字符）
+            if (codeStr.length < 2) continue;
             // 如果款号不以缩写开头，加上档口拼音缩写
             if (shopAbbr && !codeStr.startsWith(shopAbbr)) codeStr = shopAbbr + codeStr;
             results.push({ code: codeStr, cost: unitPrice });
         }
     }
-    return results;
+    // 去重：同一个款号只保留第一个
+    const seen = new Set();
+    return results.filter(g => {
+        if (seen.has(g.code)) return false;
+        seen.add(g.code);
+        return true;
+    });
 }
 
 // 同步到4号表格（商品成本表）
 async function syncToTbl4(srcRecord, srcTime) {
     if (!srcRecord || !srcRecord.fields) return 0;
     const content = getText(srcRecord.fields['单据内容']);
-    const shopName = getText(srcRecord.fields['档口名称']);
+    let shopName = getText(srcRecord.fields['档口名称']);
+    // 特例：婉星 -> 婉星儿（和write_final.js保持一致）
+    if (shopName === '婉星') shopName = '婉星儿';
+    if (shopName === '梦莎娜熙恒') shopName = '梦莎娜';
+    if (shopName === '喜梦露') shopName = '荷传';
     const shopAbbr = getPinyinInitials(shopName) || shopName.substring(0, 2);
     console.log(`  [4号] 档口=${shopName} 缩写=${shopAbbr}`);
 
@@ -718,11 +744,19 @@ async function syncToTbl4(srcRecord, srcTime) {
             if (res.code === 0) {
                 added++;
                 console.log(`  [4号] 新增 ${g.code} 成本=${g.cost}`);
+                // 更新Map，防止同一批次中重复创建
+                tbl4Map.set(g.code.trim() + '|' + shopNameTrim, { id: res.data.record.id, cost: Number(g.cost), note: '', shop: shopNameTrim, screenshots: screenshotField || [] });
             }
             await sleep(300);
         } else {
-            // 成本没变化则跳过，不更新也不写备注
-            if (existing.cost === g.cost) {
+            // 备注包含[锁定成本]或[锁定价格]则跳过更新
+            const noteStr = existing.note || '';
+            if (noteStr.includes('[锁定成本]') || noteStr.includes('[锁定价格]')) {
+                console.log(`  [4号] 跳过 ${g.code}（价格已锁定）`);
+                continue;
+            }
+            // 成本没变化则跳过，不更新也不写备注（使用Number确保类型一致）
+            if (Number(existing.cost) === Number(g.cost)) {
                 console.log(`  [4号] 跳过 ${g.code}（成本无变化）`);
             } else {
                 // 成本变化：备注追加新内容，不覆盖旧内容；合并新旧截图
@@ -833,10 +867,17 @@ async function main() {
     }
     console.log(`共 ${all.length} 条`);
 
-    // 筛选有效：是否错误字段为空（空白字符也算空）的记录才保留
+    // 筛选有效：
+    // 1. 是否错误字段为空（空白字符也算空）的记录才保留
+    // 2. 如果是"拿货件数没有识别"的错误，重新处理
     const valid = all.filter(r => {
         const err = getText(r.fields['是否错误']);
-        return !err || !err.trim();
+        // 如果没有错误，保留
+        if (!err || !err.trim()) return true;
+        // 如果是特定错误，重新处理
+        if (err.includes('拿货件数') || err.includes('档口名称') || err.includes('重复跳过')) return true;
+        // 其他错误不处理
+        return false;
     });
     console.log(`有效: ${valid.length} 条`);
 
@@ -909,7 +950,13 @@ async function main() {
     }
 
     const tbl4LatestIds = new Set([...tbl4DedupMap.values()].map(v => v.record.id));
-    const tbl4ToDelete = tbl4AllDedup.filter(r => !tbl4LatestIds.has(r.id));
+    const tbl4ToDelete = tbl4AllDedup.filter(r => {
+        if (tbl4LatestIds.has(r.id)) return false; // 保留最新记录
+        // 备注包含锁定标记的不删除
+        const note = getText(r.fields['备注']) || '';
+        if (note.includes('[锁定成本]') || note.includes('[锁定价格]')) return false;
+        return true;
+    });
 
     console.log(`4号去重: 共 ${tbl4AllDedup.length} 条, 最新记录 ${tbl4LatestIds.size} 条, 待删除 ${tbl4ToDelete.length} 条`);
 
@@ -971,60 +1018,6 @@ async function main() {
     }
     console.log(`去重完成: 删除 ${deletedDedup} 条`);
 
-    // ========== 第3步：修复4号表格中包含中文的款号 ==========
-    console.log('\n[FIX-TBL4] 修复4号表格款号...');
-    let tbl4FixAll = [], tbl4FixPt = '', tbl4FixRetries = 3;
-    while (true) {
-        const list = await listRecords(TBL4, 100, tbl4FixPt);
-        if (list.error) { await sleep(2000); tbl4FixRetries--; if (tbl4FixRetries <= 0) break; continue; }
-        if (list.data && list.data.items) tbl4FixAll.push(...list.data.items);
-        if (!list.data.has_more) break;
-        tbl4FixPt = list.data.page_token;
-        await sleep(500);
-    }
-
-    const badRecords = tbl4FixAll.filter(r => {
-        const code = (getText(r.fields['款号']) || '').trim();
-        return /[一-鿿]/.test(code);
-    });
-
-    console.log(`4号表格共 ${tbl4FixAll.length} 条, 需修复 ${badRecords.length} 条`);
-
-    let fixedCount = 0;
-    for (const r of badRecords) {
-        const oldCode = getText(r.fields['款号']).trim();
-        const shopName = getText(r.fields['档口']) || '';
-        const shopAbbr = getPinyinInitials(shopName) || shopName.substring(0, 2);
-
-        // 清理款号：去掉中文字符，保留数字和字母
-        let newCode = oldCode.replace(/[一-鿿]+/g, '');
-        // 去掉末尾的符号（-、/、_等）
-        newCode = newCode.replace(/[-\/_]+$/, '');
-        // 如果款号不以缩写开头，加上缩写
-        if (shopAbbr && !newCode.startsWith(shopAbbr)) {
-            // 检查是否有其他店铺的缩写前缀，如果有则替换
-            const otherPrefixes = ['SZTC', 'YDD', 'ASYG', 'PPT', 'XLFE', 'WXE', 'XFS', 'GZKK', 'XWYDL', 'LXJ', 'XW', 'ZL', 'SWKJ', 'YMR', 'XMY', 'SDBR', 'HBJJ', 'YXY', 'JXG', 'XYM', 'XYGCD', 'JQM', 'XNF', 'AB', 'MYS', 'TYTS'];
-            for (const prefix of otherPrefixes) {
-                if (newCode.startsWith(prefix) && prefix !== shopAbbr) {
-                    newCode = newCode.substring(prefix.length);
-                    break;
-                }
-            }
-            newCode = shopAbbr + newCode;
-        }
-
-        if (newCode !== oldCode) {
-            const res = await updateRecord(TBL4, r.id, { '款号': newCode });
-            if (res.code === 0) {
-                fixedCount++;
-                console.log(`  修复 ${oldCode} -> ${newCode} (${shopName})`);
-            } else {
-                console.log(`  修复失败 ${oldCode}: ${res.msg || res.error?.msg}`);
-            }
-            await sleep(100);
-        }
-    }
-    console.log(`款号修复完成: ${fixedCount} 条`);
 }
 
 main().catch(console.error);

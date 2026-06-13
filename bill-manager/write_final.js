@@ -30,6 +30,8 @@ function parseTimeToMs(timeStr) {
 const RECORD_TIME_MS = parseTimeToMs(args[3] || new Date().toISOString().substring(0, 16).replace('T', ' '));
 const VIDEO_PATH = args[4] || '';
 const SEQ_NO = args[5] || '001';
+const TOTAL_IMAGES = parseInt(args[6]) || 1;
+const CURRENT_IMAGE = parseInt(args[7]) || 1;
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -173,7 +175,7 @@ function parseShopName(ocrText) {
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
         const stripped = line.trim().replace(/^```[a-zA-Z]*\n?/g, '');
-        if (stripped === '客户联' || stripped === '存根联') continue;
+        if (stripped === '客户联' || stripped === '存根联' || stripped === '客户版') continue;
         if (stripped === '销售明细' || stripped === '销售/退货明细') continue;
         if (stripped === '销售单' || stripped === '退货单' || stripped === '销售退货单') continue;
         // 跳过UI元素和无关行
@@ -191,11 +193,14 @@ function parseShopName(ocrText) {
     name = name.replace(/[（()）【】\[\]]+/g, '');
     // 第二步：去掉店名内部的分隔符（点号、斜杠、中横线等连接符）
     name = name.replace(/\s*[./·\-\u2013\u2014\u0300\u0301\u0304\u0306]+\s*/g, '');
+    // 先去掉Markdown OCR常见后缀（必须在去掉销售单之前）
+    name = name.replace(/\s*(?:单据完整信息|完整信息提取|信息提取)[：:]?\s*$/, '').trim();
     name = name.replace(/\s*(?:销售退货单|退货单|销售单|收款单)\s*$/, '').trim();
     // 去掉客户联/存根联后缀（OCR有时会把它们粘到同一行）
     name = name.replace(/\s*(?:客户联|存根联)\s*$/, '').trim();
     // 客户联去掉后，销售单可能暴露到末尾，再清一次
     name = name.replace(/\s*(?:销售退货单|退货单|销售单|收款单)\s*$/, '').trim();
+    name = name.replace(/\s*(?:完整信息提取|信息提取)[：:]?\s*$/, '').trim();
     // 第三步：去掉地址（欧洲城、欧洲城店、国际面料城、万象汇、万象会、世贸、万达、广场、商城）
     name = name.replace(/(欧洲城店|欧洲城|国际面料城|万象汇|万象会|世贸|万达|广场|商城|合泰轻纺城|和泰轻纺城)/g, '');
     // 去掉服饰厂后缀
@@ -219,18 +224,18 @@ function parseShopName(ocrText) {
         name = name.replace(/(女裤|裤业|时尚女装)\s*$/, '').trim();
         name = name.replace(/(?:富|负)?[一二三四五六七八九十\d]+楼-?[a-zA-Z]?\d*(?:号(?=[^0-9A-Za-z]|$))?/g, '').replace(/号\s*$/, '').trim();
     }
-    // 特例：婉星 -> 婉星儿（所有路径统一处理）
-    if (name === '婉星') name = '婉星儿';
-    // 特例：梦莎娜熙恒 -> 梦莎娜
-    if (name === '梦莎娜熙恒') name = '梦莎娜';
-    // 特例：喜梦露 -> 荷传
-    if (name === '喜梦露') name = '荷传';
     // 去掉末尾的城市名后缀（如"株洲市" -> "予檬"）
     name = name.replace(/^[一-龥]{2,4}市/, '');
     // 如果仍然是空的，返回空字符串（不要返回原始未处理的字符串）
     if (!name.trim()) return '';
     // 去掉开头的#和空白符号，以及所有【】[]符号和横杠-
     name = name.replace(/^[#\s]+/, '').replace(/^[【】\[\]]+/, '').replace(/[【】\]]+$/, '').replace(/-/g, '');
+    // 特例：婉星 -> 婉星儿（必须在去掉#前缀之后）
+    if (name === '婉星') name = '婉星儿';
+    // 特例：梦莎娜熙恒 -> 梦莎娜
+    if (name === '梦莎娜熙恒') name = '梦莎娜';
+    // 特例：喜梦露 -> 荷传
+    if (name === '喜梦露') name = '荷传';
     // 去掉最左边的字母段（只去掉字母，不影响中文字符）
     name = name.replace(/^[^0-9a-zA-Z\u4e00-\u9fa5]*[a-zA-Z]+/, '');
     // \u6700\u7ec8\u6821\u9a8c\uff1a\u6e05\u6d17\u540e\u4ecd\u542b\u9500\u552e\u5355/\u9000\u8d27\u5355\u7b49\u5173\u952e\u5b57\uff0c\u8bf4\u660eOCR\u683c\u5f0f\u5f02\u5e38\uff0c\u8fd4\u56de\u7a7a
@@ -298,22 +303,38 @@ function parseRealReceived(ocrText) {
 }
 
 function parseTotal(ocrText) {
-    const m0 = ocrText.match(/扫码支付[:：\s]*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
+    // 将换行符替换为空格，处理OCR文本中关键词被换行分割的情况
+    const text = ocrText.replace(/\n/g, ' ');
+
+    // 优先匹配带"元"的金额（更可靠）
+    const m0 = text.match(/扫\s*码\s*支\s*付[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)\s*元/);
     if (m0) return parseFloat(m0[1]);
-    const m = ocrText.match(/(?:实付|已付|付款)[:：\s]*[¥￥]?\s*(-?\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
-    if (m) return parseFloat(m[1]);
-    const m2 = ocrText.match(/微信(?:账户|支付)?[:：\s]*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
-    if (m2) return parseFloat(m2[1]);
-    const m3 = ocrText.match(/现金\s*(?:账户|支付)?[:：\s]*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
-    if (m3) return parseFloat(m3[1]);
-    const m4 = ocrText.match(/支付宝(?:付|支付|账户)?[:：\s]*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
-    if (m4) return parseFloat(m4[1]);
-    const m5 = ocrText.match(/农业银行账户[:：\s]*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
-    if (m5) return parseFloat(m5[1]);
-    const m6 = ocrText.match(/刷卡(?:\([^)]*\))?\s*[:：\s]*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
-    if (m6) return parseFloat(m6[1]);
-    const m7 = ocrText.match(/汇款(?:\([^)]*\))?\s*[:：\s]*[¥￥]?\s*(\d{1,10}(?:\.\d{1,2})?(?![0-9]))/);
-    if (m7) return parseFloat(m7[1]);
+    const m1 = text.match(/(?:实\s*付|已\s*付|付\s*款|本\s*单\s*额)[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)\s*元/);
+    if (m1 && parseFloat(m1[1]) !== 0) return parseFloat(m1[1]);
+    const m2 = text.match(/微\s*信(?:账\s*户|支\s*付)?[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)\s*元/);
+    if (m2 && parseFloat(m2[1]) > 0) return parseFloat(m2[1]);
+    const m3 = text.match(/现\s*金\s*(?:账\s*户|支\s*付)?[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)\s*元/);
+    if (m3 && parseFloat(m3[1]) > 0) return parseFloat(m3[1]);
+    const m4 = text.match(/支\s*付\s*宝(?:付|支\s*付|账\s*户)?[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)\s*元/);
+    if (m4 && parseFloat(m4[1]) > 0) return parseFloat(m4[1]);
+    const m5 = text.match(/农\s*业\s*银\s*行[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)\s*元/);
+    if (m5 && parseFloat(m5[1]) > 0) return parseFloat(m5[1]);
+    const m6 = text.match(/刷\s*卡[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)\s*元/);
+    if (m6 && parseFloat(m6[1]) > 0) return parseFloat(m6[1]);
+    const m7 = text.match(/汇\s*款[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)\s*元/);
+    if (m7 && parseFloat(m7[1]) > 0) return parseFloat(m7[1]);
+
+    // 再匹配不带"元"的金额（限制更严格，最多8位避免匹配账号）
+    const m10 = text.match(/扫\s*码\s*支\s*付[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)(?!\d)/);
+    if (m10) return parseFloat(m10[1]);
+    const m11 = text.match(/(?:实\s*付|已\s*付|付\s*款)[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)(?!\d)/);
+    if (m11 && parseFloat(m11[1]) > 0) return parseFloat(m11[1]);
+    const m12 = text.match(/微\s*信(?:支\s*付)?[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)(?!\d)/);
+    if (m12 && parseFloat(m12[1]) > 0) return parseFloat(m12[1]);
+    const m13 = text.match(/现\s*金[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)(?!\d)/);
+    if (m13 && parseFloat(m13[1]) > 0) return parseFloat(m13[1]);
+    const m14 = text.match(/支\s*付\s*宝(?:付|支\s*付)?[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)(?!\d)/);
+    if (m14 && parseFloat(m14[1]) > 0) return parseFloat(m14[1]);
     return 0;
 }
 
@@ -335,23 +356,26 @@ function parseSalesQuantity(ocrText) {
     let qtyColIndex = -1; // 数量列的索引
     const lines = ocrText.split('\n');
     for (const line of lines) {
-        if (line.includes('合计')) { reachedSummary = true; continue; }
+        if (line.includes('合计') || line.includes('总计')) { reachedSummary = true; continue; }
         if (reachedSummary) continue;
         if (/^[-]+$/.test(line.trim())) continue;
+        // 跳过分隔行（如 |----|----|----|）
+        if (/^\|[-|]+\|$/.test(line.trim())) continue;
         // 匹配表格行
         if (line.includes('|')) {
-            // 不过滤空字符串，保持列索引正确
             const parts = line.split('|').map(p => p.trim());
-            // 去掉首尾空元素（行首尾的|产生的空字符串）
             while (parts.length > 0 && parts[0] === '') parts.shift();
             while (parts.length > 0 && parts[parts.length - 1] === '') parts.pop();
-            // 检查是否是表头行，找到"数量"列的位置
-            if (line.includes('款号') || line.includes('名称')) {
-                const numIdx = parts.findIndex(p => p === '数量');
+            // 检查是否是表头行，找到"数量"或"件数"列的位置
+            if (line.includes('款号') || line.includes('名称') || line.includes('商品')) {
+                // 优先精确匹配"数量"或"件数"，避免"颜色规格(数量)"误匹配
+                let numIdx = parts.findIndex(p => p === '数量' || p === '件数');
+                if (numIdx < 0) numIdx = parts.findIndex(p => p === '小计');
+                if (numIdx < 0) numIdx = parts.findIndex(p => (p.includes('数量') || p.includes('件数')) && !p.includes('(') && !p.includes('（'));
                 if (numIdx >= 0) qtyColIndex = numIdx;
                 continue;
             }
-            // 使用"数量"列的索引，或默认第3列
+            // 使用"数量"或"件数"列的索引，或默认第3列
             const idx = qtyColIndex >= 0 ? qtyColIndex : 2;
             if (parts.length > idx) {
                 const qty = parseInt(parts[idx]);
@@ -366,6 +390,23 @@ function parseSalesQuantity(ocrText) {
         if (plainM) { salesTotal += parseInt(plainM[1]); }
     }
     if (salesTotal > 0) return salesTotal;
+
+    // 如果找到了件数列且合计，直接返回件数而不是金额
+    if (qtyColIndex >= 0) {
+        for (const line of lines) {
+            if (line.includes('合计') || line.includes('总计')) {
+                const parts = line.split('|').map(p => p.trim());
+                while (parts.length > 0 && parts[0] === '') parts.shift();
+                while (parts.length > 0 && parts[parts.length - 1] === '') parts.pop();
+                if (parts.length > qtyColIndex) {
+                    const qty = parseInt(parts[qtyColIndex]);
+                    if (!isNaN(qty) && qty > 0 && qty < 10000) {
+                        return qty;
+                    }
+                }
+            }
+        }
+    }
     // 明细行没有正数，用合计作fallback
     const m2 = ocrText.match(/合计[：:]\s*数量\s*(\d{1,10})/);
     if (m2) return parseInt(m2[1]);
@@ -398,15 +439,19 @@ function parseReturnQuantity(ocrText) {
     let qtyColIndex = -1;
     const lines = ocrText.split('\n');
     for (const line of lines) {
-        if (line.includes('合计')) { reachedSummary = true; continue; }
+        if (line.includes('合计') || line.includes('总计')) { reachedSummary = true; continue; }
         if (reachedSummary) continue;
         if (/^[-]+$/.test(line.trim())) continue;
+        // 跳过分隔行（如 |----|----|----|）
+        if (/^\|[-|]+\|$/.test(line.trim())) continue;
         if (line.includes('|')) {
             const parts = line.split('|').map(p => p.trim());
             while (parts.length > 0 && parts[0] === '') parts.shift();
             while (parts.length > 0 && parts[parts.length - 1] === '') parts.pop();
-            if (line.includes('款号') || line.includes('名称')) {
-                const numIdx = parts.findIndex(p => p === '数量');
+            if (line.includes('款号') || line.includes('名称') || line.includes('商品')) {
+                let numIdx = parts.findIndex(p => p === '数量' || p === '件数');
+                if (numIdx < 0) numIdx = parts.findIndex(p => p === '小计');
+                if (numIdx < 0) numIdx = parts.findIndex(p => (p.includes('数量') || p.includes('件数')) && !p.includes('(') && !p.includes('（'));
                 if (numIdx >= 0) qtyColIndex = numIdx;
                 continue;
             }
@@ -515,7 +560,9 @@ async function main() {
         const prevBalance = parsePrevBalance(ocrText);
         const cumBalance = parseCumulativeBalance(ocrText);
         const realReceived = parseRealReceived(ocrText);
-        const paymentAmt = realReceived !== 0 ? realReceived : parseTotal(ocrText);
+        let paymentAmt = realReceived !== 0 ? realReceived : parseTotal(ocrText);
+        // 负数表示退货，付款金额应为0
+        if (paymentAmt < 0) paymentAmt = 0;
 
         // 解析件数
         let salesQty = parseSalesQuantity(ocrText);
@@ -561,13 +608,13 @@ async function main() {
             try {
                 const up = await uploadFile(token, imgPath, fileName);
                 if (up.code === 0) fileToken = up.data.file_token;
-                else console.warn(`  [${i+1}] 上传失败: ${up.msg}`);
+                else console.warn(`  [${CURRENT_IMAGE}/${TOTAL_IMAGES}] 上传失败: ${up.msg}`);
             } catch (e) {
                 if (e.message === 'FEISHU_STORAGE_QUOTA_EXCEEDED') {
                     console.error('\n!!! 飞书存储配额已达上限（免费2GB），请清理后重试 !!!');
                     process.exit(1);
                 }
-                console.warn(`  [${i+1}] 上传异常: ${e.message}`);
+                console.warn(`  [${CURRENT_IMAGE}/${TOTAL_IMAGES}] 上传异常: ${e.message}`);
             }
         }
 
@@ -590,16 +637,18 @@ async function main() {
         if (fileToken) fields["单据截图"] = [{ file_token: fileToken, name: `bill_seg${segId}.jpg` }];
 
         // 录入日志
-        console.log(`  [${i+1}/${bills.length}] 档口:${shopName || '??'} 批次:${batchNo || '??'} 上次结余:${prevBalance} 累计结余:${cumBalance} 付款:${paymentAmt} 拿货:${salesQty} 退货:${returnQty} ${errorNote ? '⚠ ' + errorNote : '✓'}`);
+        console.log(`  [${CURRENT_IMAGE}/${TOTAL_IMAGES}] 档口:${shopName || '??'} 批次:${batchNo || '??'} 上次结余:${prevBalance} 累计结余:${cumBalance} 付款:${paymentAmt} 拿货:${salesQty} 退货:${returnQty} ${errorNote ? '⚠ ' + errorNote : '✓'}`);
 
         await sleep(500);  // 限速延迟
         const res = await createRecord(token, fields);
-        process.stderr.write('record_res:' + JSON.stringify(res) + '\n');
+        if (!res || res.error || res.code !== 0) {
+            process.stderr.write('record_res:' + JSON.stringify(res) + '\n');
+        }
         if (!res || res.error) {
             console.error('  [record error]', res?.error || 'unknown');
         } else if (res.code === 0) {
             successCount++;
-            console.log(`  [${i+1}/${bills.length}] ✅ ${shopName} ${batchNo} error=${errorNote || 'OK'}`);
+            console.log(`  [${CURRENT_IMAGE}/${TOTAL_IMAGES}] ✅ ${shopName} ${batchNo} error=${errorNote || 'OK'}`);
             // 只有录入成功且无识别错误时才重命名图片/视频，方便出错时重新录入
             if (!errorNote && VIDEO_PATH) {
                 const ext = path.extname(VIDEO_PATH);
@@ -613,13 +662,14 @@ async function main() {
                 }
             }
         } else {
-            console.error(`  [${i+1}] ❌ ${res.msg}`);
+            console.error(`  [${CURRENT_IMAGE}/${TOTAL_IMAGES}] ❌ ${res.msg}`);
         }
     }
 
     console.log(`\n========== 完成 ==========`);
     console.log(`有效录入: ${successCount} 张单据`);
     console.log(`无效跳过: ${bills.length - successCount} 张单据`);
+    console.log(`进度: ${CURRENT_IMAGE}/${TOTAL_IMAGES}`);
     console.log(`=========================`);
 }
 

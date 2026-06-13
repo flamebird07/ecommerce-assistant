@@ -1,0 +1,31 @@
+# 日志文件
+*.log
+bill-manager/server.log
+bill-manager/server_output.log
+
+# 临时文件
+*.lock
+bill-manager/.server.lock
+bill-manager/__pycache__/
+bill-manager/current_shop.txt
+bill-manager/fee_config.json
+bill-manager/dir_config.json
+bill-manager/pdd_products.json
+
+# Cookie文件（敏感信息）
+bill-manager/cookies/
+bill-manager/pdd-cookies/
+
+# 截图文件
+bill-manager/product-list-final-*.png
+bill-manager/step*.png
+
+# 测试文件
+bill-manager/test-*.js
+bill-manager/temp_check.js
+bill-manager/restore_codes.js
+
+# 启动脚本
+bill-manager/start-hidden.py
+bill-manager/start-hidden.vbs
+bill-manager/start-server.bat
