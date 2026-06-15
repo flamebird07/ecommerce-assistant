@@ -103,7 +103,7 @@ function getLogsFromFile(filePath, hours = 24, linesCount = 1000) {
         if (fs.existsSync(filePath)) {
             const content = fs.readFileSync(filePath, 'utf8');
             const lines = content.split('\n')
-                .map(l => l.replace(/[\r]/g, '').replace(/\\/g, '/').replace(/"/g, "'").trim())
+                .map(l => l.replace(/[\r]/g, '').trim())
                 .filter(l => l);
 
             // 时间过滤

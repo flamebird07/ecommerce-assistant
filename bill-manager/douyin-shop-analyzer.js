@@ -744,8 +744,8 @@ async function writeToFeishu(accessToken, products, shopName) {
             console.log(`  动态涨价建议: 成本${product.cost}, 退货率${maxRate}%, 需毛利${sg}, 当前毛利${currentGross.toFixed(0)}`);
           }
         }
-      } else if (orderNum >= 4 && maxRate >= 1.0) {
-        // 销量>=4且退货率=100%，建议下架
+      } else if (orderNum >= 5 && maxRate >= 1.0) {
+        // 销量>=5且退货率=100%，建议下架
         suggestionText = '建议下架';
         // 同时计算建议毛利
         if (product.cost !== undefined && product.cost !== null && product.merchantIncome) {
@@ -2000,8 +2000,12 @@ async function processProductRound(page, context, targetCount, accessToken, shop
           // 获取商家编码
           const costOrderData = await getOrderData(orderPage, CONFIG.douyin.orderListUrl);
           if (costOrderData && costOrderData.merchantCode) {
-            const merchantCode = costOrderData.merchantCode;
-            console.log(`  商家编码: ${merchantCode}`);
+            let merchantCode = costOrderData.merchantCode;
+            // 清理商家编码：去掉中文描述、颜色、尺码等
+            merchantCode = merchantCode.replace(/[-_].*$/, '');  // 去掉 -灰色;L 等
+            merchantCode = merchantCode.replace(/[一-龥]+/g, '');  // 去掉中文
+            merchantCode = merchantCode.replace(/[^a-zA-Z0-9+]/g, '');  // 只保留字母数字+
+            console.log(`  商家编码: ${costOrderData.merchantCode} -> ${merchantCode}`);
             // 查询成本
             let newCost = null;
             if (merchantCode.includes('+')) {

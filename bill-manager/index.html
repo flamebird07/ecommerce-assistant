@@ -605,6 +605,10 @@
         function log(message, type = '') {
             const el = document.getElementById('log-' + activeLogTab);
             if (!el) return;
+            const container = el.parentElement;
+            // 检测用户是否在底部（距离底部50px以内算在底部）
+            const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
+
             let time = '';
             const tsMatch = message.match(/^\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z)\]\s*/);
             if (tsMatch) {
@@ -617,7 +621,10 @@
             }
             const cls = type ? ` class="${type}"` : '';
             el.insertAdjacentHTML('beforeend', `<span${cls}>[${time}] ${message}</span>\n`);
-            el.parentElement.scrollTop = el.parentElement.scrollHeight;
+            // 只有用户在底部时才自动滚动，否则保持当前位置
+            if (isAtBottom) {
+                container.scrollTop = container.scrollHeight;
+            }
         }
 
         // ========== 状态轮询 ==========
@@ -630,30 +637,50 @@
             return (activeLogTab === 'douyin' || activeLogTab === 'auto') ? '/get-douyin-logs' : '/get-logs';
         }
 
-        // 已显示的日志条数（用于增量显示）
-        let lastProcessedLogCount = 0;
+        // 已显示的日志ID集合（用时间+内容前50字符做唯一标识）
+        let shownLogIds = new Set();
+        // 上次轮询时的末尾时间戳，用于快速判断是否有新日志
+        let lastEndTime = '';
 
         function startStatusPolling() {
             if (statusPolling) return;
-            lastProcessedLogCount = 0;
+            shownLogIds.clear();
+            lastEndTime = '';
             statusPolling = setInterval(async () => {
                 try {
                     const lr = await fetchWithTimeout(getLogsEndpoint());
                     const ld = await lr.json();
-                    if (ld.logs && ld.logs.length > lastProcessedLogCount) {
-                        const newLogs = ld.logs.slice(lastProcessedLogCount);
-                        lastProcessedLogCount = ld.logs.length;
-                        newLogs.forEach(msg => {
-                            if (msg.includes('[错误]') || msg.includes('失败')) log(msg, 'error');
-                            else if (msg.includes('完成') || msg.includes('成功')) log(msg, 'success');
-                            else if (msg.includes('##') || msg.includes('商品ID')) log(msg, 'product');
-                            else if (msg.includes('>>') || msg.includes('开始')) log(msg, 'info');
-                            else log(msg);
-                            if (msg.includes('Cookie已过期，自动删除店铺')) {
-                                const m = msg.match(/自动删除店铺:\s*(.+)/);
-                                if (m) { if (selectedShop === m[1].trim()) selectShop(''); loadShops(); }
-                            }
-                        });
+                    if (!ld.logs || ld.logs.length === 0) return;
+
+                    // 快速检查：如果最后一条日志的时间戳没变，说明没有新日志
+                    const newEndTime = ld.logs[ld.logs.length - 1].substring(0, 30);
+                    if (newEndTime === lastEndTime) return;
+                    lastEndTime = newEndTime;
+
+                    // 逐条检查并显示新日志
+                    let hasNew = false;
+                    ld.logs.forEach(msg => {
+                        // 用时间戳+内容前50字符作为唯一ID
+                        const id = msg.substring(0, 80);
+                        if (shownLogIds.has(id)) return;
+                        shownLogIds.add(id);
+                        hasNew = true;
+
+                        if (msg.includes('[错误]') || msg.includes('失败')) log(msg, 'error');
+                        else if (msg.includes('完成') || msg.includes('成功')) log(msg, 'success');
+                        else if (msg.includes('##') || msg.includes('商品ID')) log(msg, 'product');
+                        else if (msg.includes('>>') || msg.includes('开始')) log(msg, 'info');
+                        else log(msg);
+                        if (msg.includes('Cookie已过期，自动删除店铺')) {
+                            const m = msg.match(/自动删除店铺:\s*(.+)/);
+                            if (m) { if (selectedShop === m[1].trim()) selectShop(''); loadShops(); }
+                        }
+                    });
+
+                    // 定期清理旧ID，防止内存泄漏
+                    if (shownLogIds.size > 5000) {
+                        const arr = Array.from(shownLogIds);
+                        shownLogIds = new Set(arr.slice(-2500));
                     }
                 } catch {}
                 // 拉进程状态（单独try-catch，不受日志拉取失败影响）
@@ -1323,6 +1350,44 @@
         setupFeeConfigListeners();  // 设置费用配置监听器
         loadDirConfig();
         loadShops();
+
+        // 页面加载后自动显示最近日志
+        async function loadRecentLogs() {
+            try {
+                const lr = await fetchWithTimeout('/get-douyin-logs?lines=200');
+                const ld = await lr.json();
+                const el = document.getElementById('log-douyin');
+                if (el && ld.logs && ld.logs.length > 0) {
+                    el.innerHTML = '';
+                    ld.logs.forEach(msg => {
+                        let time = '';
+                        const tsMatch = msg.match(/^\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z)\]\s*/);
+                        if (tsMatch) {
+                            try {
+                                time = new Date(tsMatch[1]).toLocaleTimeString();
+                                msg = msg.substring(tsMatch[0].length);
+                            } catch { time = new Date().toLocaleTimeString(); }
+                        } else {
+                            time = new Date().toLocaleTimeString();
+                        }
+                        let cls = '';
+                        if (msg.includes('[错误]') || msg.includes('失败')) cls = 'error';
+                        else if (msg.includes('完成') || msg.includes('成功')) cls = 'success';
+                        else if (msg.includes('>>') || msg.includes('开始')) cls = 'info';
+                        const clsStr = cls ? ` class="${cls}"` : '';
+                        el.insertAdjacentHTML('beforeend', `<span${clsStr}>[${time}] ${msg}</span>\n`);
+                    });
+                    el.parentElement.scrollTop = el.parentElement.scrollHeight;
+                    // 初始化 shownLogIds
+                    ld.logs.forEach(msg => {
+                        shownLogIds.add(msg.substring(0, 80));
+                    });
+                }
+            } catch (e) {
+                console.error('加载最近日志失败:', e);
+            }
+        }
+        loadRecentLogs();
 
         // 定期检查关机状态（禁用，避免频繁调用）
         // setInterval(checkShutdownStatus, 30000); // 每30秒检查一次
