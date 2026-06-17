@@ -691,10 +691,13 @@
                         if (isBillRunning) { isBillRunning = false; setBillButtons(false); pendingBillDone = true; }
                         if (isDouyinRunning) { isDouyinRunning = false; setDouyinButtons(false); pendingDouyinDone = true; }
                     }
-                    // 两个任务都结束后，延迟停止轮询
+                    // 两个任务都结束后，延迟停止轮询并检查关机
+                    // 重要：自动化运行期间（autoRunning=true）不能在此触发关机，
+                    // 因为店铺之间的间隔等待期进程会短暂结束，但自动化还没完成。
+                    // 自动化完成后的关机由 startAutoProcess 自身负责（1197行）。
                     if (!isBillRunning && !isDouyinRunning && (pendingBillDone || pendingDouyinDone)) {
                         setTimeout(() => {
-                            if (!isBillRunning && !isDouyinRunning) {
+                            if (!isBillRunning && !isDouyinRunning && !autoRunning) {
                                 stopStatusPolling();
                                 // 检查自动关机选项（无论是哪个页面勾选的）
                                 if (document.getElementById('autoShutdownAfterAll')?.checked || document.getElementById('autoShutdown')?.checked) {
@@ -1022,13 +1025,83 @@
             const platformName = selectedPlatform === 'pinduoduo' ? '拼多多' : '抖店';
             log(`开始多次获取${platformName} [${selectedShop}] (目标${tc}个, 间隔${im}分钟)...`, 'info');
             startStatusPolling();
-            const multiEndpoint = selectedPlatform === 'pinduoduo' ? '/run-pdd-multi' : '/run-douyin-multi';
-            try {
-                const res = await fetchWithTimeout(multiEndpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ targetCount: tc, intervalMinutes: im, shopName: selectedShop, shippingFee: sf, insurance: ins, platformFee: pf }) }, 3600000);
-                const r = await res.json();
-                log(r.success ? '多次执行完成' : '执行失败: ' + r.message, r.success ? 'success' : 'error');
-            } catch (e) { log('请求失败: ' + e.message, 'error'); }
-            isDouyinRunning = false; setDouyinButtons(false);
+
+            if (selectedPlatform === 'pinduoduo') {
+                // 拼多多没有内置multi模式，由前端循环调用单次接口
+                let round = 1;
+                let multiStopped = false;
+                const checkStop = () => { return !isDouyinRunning || multiStopped; };
+                while (!checkStop()) {
+                    log(`[第${round}轮] 开始获取...`, 'info');
+                    try {
+                        const res = await fetchWithTimeout('/run-pdd-analyzer', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ targetCount: tc, shopName: selectedShop, shippingFee: sf, insurance: ins, platformFee: pf })
+                        }, 300000);
+                        const r = await res.json();
+                        if (!r.success) {
+                            if (r.message && r.message.includes('已有运行的进程')) {
+                                log(`[第${round}轮] ${r.message}，等待60秒后重试`, 'warning');
+                                await new Promise(r => setTimeout(r, 60000));
+                                continue;
+                            }
+                            log(`[第${round}轮] 启动失败: ${r.message}`, 'error');
+                        }
+                    } catch (e) {
+                        log(`[第${round}轮] 请求失败: ${e.message}`, 'error');
+                    }
+                    // 等待进程结束
+                    let waitCount = 0;
+                    const maxWait = Math.ceil(Math.max(120, tc * 60 + 120) / 3);
+                    while (!checkStop() && waitCount < maxWait) {
+                        try {
+                            const sr = await fetchWithTimeout('/get-process-status');
+                            const sd = await sr.json();
+                            if (!sd.running) break;
+                        } catch {}
+                        await new Promise(r => setTimeout(r, 3000));
+                        waitCount++;
+                    }
+                    if (!isDouyinRunning) { multiStopped = true; break; }
+
+                    log(`[第${round}轮] 完成`, 'success');
+                    round++;
+
+                    // 检查cookie过期
+                    try {
+                        const logRes = await fetchWithTimeout('/get-douyin-logs');
+                        const logData = await logRes.json();
+                        const recentLogs = (logData.logs || []).slice(-20).join(' ');
+                        if (recentLogs.includes('COOKIE_EXPIRED:' + selectedShop)) {
+                            log(`[${selectedShop}] 检测到登录过期，停止多次执行`, 'warning');
+                            multiStopped = true; break;
+                        }
+                    } catch {}
+
+                    // 间隔等待
+                    if (!checkStop()) {
+                        const nextTime = new Date(Date.now() + im * 60000);
+                        log(`等待${im}分钟，下一轮 ${nextTime.toLocaleTimeString()}`, 'info');
+                        const waitEnd = Date.now() + im * 60000;
+                        while (!checkStop() && Date.now() < waitEnd) {
+                            await new Promise(r => setTimeout(r, 10000));
+                        }
+                    }
+                }
+                log(`拼多多多次执行结束（共${round - 1}轮）`, 'success');
+                stopStatusPolling();
+                isDouyinRunning = false; setDouyinButtons(false);
+            } else {
+                // 抖店：调用内置multi模式
+                const multiEndpoint = '/run-douyin-multi';
+                try {
+                    const res = await fetchWithTimeout(multiEndpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ targetCount: tc, intervalMinutes: im, shopName: selectedShop, shippingFee: sf, insurance: ins, platformFee: pf }) }, 3600000);
+                    const r = await res.json();
+                    log(r.success ? '多次执行完成' : '执行失败: ' + r.message, r.success ? 'success' : 'error');
+                } catch (e) { log('请求失败: ' + e.message, 'error'); }
+                isDouyinRunning = false; setDouyinButtons(false);
+            }
         }
 
         // ========== 自动化处理 ==========
@@ -1067,6 +1140,8 @@
 
             // 记录每个店铺是否已结束
             const finishedShops = new Set();
+            // 记录每个店铺连续失败次数，超过3次才终止
+            const shopFailCounts = new Map();
             let round = 1;
 
             while (autoRunning) {
@@ -1101,12 +1176,38 @@
                         const r = await res.json();
                         success = r.success;
                         if (!r.success) {
-                            log(`[自动化] ${c.shopName}: 失败: ${r.message}`, 'error');
-                            // 如果是登录相关错误，立即标记为结束，不等待进程
-                            if (r.message && (r.message.includes('登录') || r.message.includes('Cookie') || r.message.includes('扫码'))) {
-                                shouldWaitForProcess = false;
-                                finishedShops.add(idx);
-                                log(`[自动化] ${c.shopName}: 登录失败，店铺终止`, 'warning');
+                            // 区分"可重试"和"不可恢复"的错误
+                            if (r.message && r.message.includes('已有运行的进程')) {
+                                // 进程冲突：前一个任务还没结束，等待后重试本轮
+                                log(`[自动化] ${c.shopName}: ${r.message}，等待60秒后重试`, 'warning');
+                                success = true; // 视为可重试，不标记终止
+                                shouldWaitForProcess = true;
+                                // 等待60秒让前一个进程结束
+                                await new Promise(r => setTimeout(r, 60000));
+                                // 重新发起请求
+                                try {
+                                    const retryRes = await fetchWithTimeout(endpoint, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ targetCount, shopName: c.shopName, shippingFee: sf, insurance: ins, platformFee: pf })
+                                    }, 300000);
+                                    const retryR = await retryRes.json();
+                                    success = retryR.success;
+                                    if (!retryR.success) {
+                                        log(`[自动化] ${c.shopName}: 重试失败: ${retryR.message}`, 'error');
+                                    }
+                                } catch (retryE) {
+                                    log(`[自动化] ${c.shopName}: 重试请求失败: ${retryE.message}`, 'error');
+                                    success = false;
+                                }
+                            } else {
+                                log(`[自动化] ${c.shopName}: 失败: ${r.message}`, 'error');
+                                // 如果是登录相关错误，立即标记为结束，不等待进程
+                                if (r.message && (r.message.includes('登录') || r.message.includes('Cookie') || r.message.includes('扫码'))) {
+                                    shouldWaitForProcess = false;
+                                    finishedShops.add(idx);
+                                    log(`[自动化] ${c.shopName}: 登录失败，店铺终止`, 'warning');
+                                }
                             }
                         }
                     } catch (e) {
@@ -1115,11 +1216,13 @@
                         shouldWaitForProcess = false;
                         finishedShops.add(idx);
                     }
-
                     // 等待进程结束（只在需要时等待）
+                    // 超时按 targetCount 动态计算：每条约需60秒（含页面等待），再加120秒余量
                     if (autoRunning && success && shouldWaitForProcess) {
+                        const maxWaitSec = Math.max(120, targetCount * 60 + 120);
+                        const maxWaitCount = Math.ceil(maxWaitSec / 3);
                         let waitCount = 0;
-                        while (autoRunning && waitCount < 20) { // 最多等待60秒
+                        while (autoRunning && waitCount < maxWaitCount) {
                             try {
                                 const sr = await fetchWithTimeout('/get-process-status');
                                 const sd = await sr.json();
@@ -1127,6 +1230,10 @@
                             } catch {}
                             await new Promise(r => setTimeout(r, 3000));
                             waitCount++;
+                        }
+                        if (waitCount >= maxWaitCount) {
+                            log(`[自动化] ${c.shopName}: 等待进程结束超时(${maxWaitSec}秒)，强制停止`, 'warning');
+                            fetchWithTimeout('/stop-process', { method: 'POST' }).catch(() => {});
                         }
                     }
 
@@ -1140,25 +1247,29 @@
 
                     // 检查是否触发结束条件
                     if (success) {
+                        // 成功完成，重置失败计数
+                        shopFailCounts.set(idx, 0);
                         try {
                             const logRes = await fetchWithTimeout('/get-douyin-logs');
                             const logData = await logRes.json();
-                            const recentLogs = (logData.logs || []).slice(-30).join(' '); // 增加到30条
+                                    const recentLogs = (logData.logs || []).slice(-30).join(' '); // 增加到30条
 
-                            // 检查登录过期（只检测明确的过期标记）
-                            const hasExpiredMarker = recentLogs.includes('COOKIE_EXPIRED:' + c.shopName) &&
-                                                   recentLogs.includes('Cookie文件不存在');
+                            // 统一过期检测：抖店和拼多多脚本都会输出 COOKIE_EXPIRED:店铺名 标记
+                            const hasExpiredMarker = recentLogs.includes('COOKIE_EXPIRED:' + c.shopName);
                             const hasLoginError = recentLogs.includes('登录未成功') &&
                                                  recentLogs.includes('需要扫码登录') &&
                                                  !recentLogs.includes('登录成功！');
 
-                            // 只有同时满足登录失败和Cookie文件不存在才认为真的过期
+                            // 检测到登录过期，自动移除店铺（抖店/拼多多统一）
                             if (hasExpiredMarker || hasLoginError) {
                                 log(`[自动化] ${c.shopName}: 检测到登录过期，自动移除店铺`, 'warning');
-                                // 自动删除店铺配置
+                                // 1. 删除服务端cookie文件（否则下拉框会重新加载）
+                                try { await fetchWithTimeout('/remove-shop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ shopName: c.shopName }) }); } catch {}
+                                // 2. 先从自动化配置中删除（防止 loadShops 异步回来时又加回去）
                                 autoShopConfigs.splice(idx, 1);
                                 finishedShops.add(idx);
-                                // 更新界面显示
+                                // 3. 刷新下拉框（此时cookie已删，不会重新加载该店铺）
+                                loadShops();
                                 renderAutoShopList();
                             }
                             // 检查无新数据（多次写入0条才认为无新数据）
@@ -1176,8 +1287,15 @@
                             log(`[自动化] ${c.shopName}: 日志检查出错，保留店铺在下轮处理`, 'warning');
                         }
                     } else {
-                        // 请求失败也标记结束，避免反复重试
-                        finishedShops.add(idx);
+                        // 请求失败（非登录问题）：累计失败次数，超过3次终止店铺
+                        const failCount = (shopFailCounts.get(idx) || 0) + 1;
+                        shopFailCounts.set(idx, failCount);
+                        if (failCount >= 3) {
+                            finishedShops.add(idx);
+                            log(`[自动化] ${c.shopName}: 连续${failCount}次失败，店铺终止`, 'error');
+                        } else {
+                            log(`[自动化] ${c.shopName}: 请求失败(${failCount}/3)，保留店铺在下轮重试`, 'warning');
+                        }
                     }
 
                     // 等待间隔时间（最后一个店铺不等待）
@@ -1215,8 +1333,8 @@
             // 停止正在运行的进程
             fetchWithTimeout('/stop-process', { method: 'POST' }).catch(() => {});
 
-            // 如果设置了自动关机，取消关机
-            if (document.getElementById('autoShutdownAfterAll')?.checked) {
+            // 如果设置了自动关机，取消关机（与触发关机的条件保持一致：两个勾选框任一勾选）
+            if (document.getElementById('autoShutdownAfterAll')?.checked || document.getElementById('autoShutdown')?.checked) {
                 log('检测到已设置自动关机，正在取消...', 'info');
                 fetchWithTimeout('/cancel-shutdown', { method: 'POST' }).catch(() => {});
                 log('已取消自动关机', 'success');
@@ -1389,8 +1507,10 @@
         }
         loadRecentLogs();
 
-        // 定期检查关机状态（禁用，避免频繁调用）
-        // setInterval(checkShutdownStatus, 30000); // 每30秒检查一次
+        // 页面加载时检查一次关机状态，若已安排关机则显示"取消关机"按钮
+        checkShutdownStatus();
+        // 定期检查关机状态（/check-shutdown 现为只读接口，可安全轮询）
+        setInterval(checkShutdownStatus, 30000); // 每30秒检查一次
     </script>
 </body>
 </html>

@@ -24,6 +24,12 @@ bill-manager/step*.png
 bill-manager/test-*.js
 bill-manager/temp_check.js
 bill-manager/restore_codes.js
+bill-manager/pdd-diagnose.js
+bill-manager/pdd-test-extract.js
+bill-manager/pdd-test-output.txt
+bill-manager/pdd-debug.json
+bill-manager/pdd-product-data.png
+bill-manager/pdd-shop-name.png
 
 # 启动脚本
 bill-manager/start-hidden.py

@@ -309,8 +309,8 @@ function parseTotal(ocrText) {
     // 优先匹配带"元"的金额（更可靠）
     const m0 = text.match(/扫\s*码\s*支\s*付[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)\s*元/);
     if (m0) return parseFloat(m0[1]);
-    const m1 = text.match(/(?:实\s*付|已\s*付|付\s*款|本\s*单\s*额)[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)\s*元/);
-    if (m1 && parseFloat(m1[1]) !== 0) return parseFloat(m1[1]);
+    const m1 = text.match(/(?:实\s*付|已\s*付|付\s*款)[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)\s*元/);
+    if (m1 && parseFloat(m1[1]) > 0) return parseFloat(m1[1]);
     const m2 = text.match(/微\s*信(?:账\s*户|支\s*付)?[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)\s*元/);
     if (m2 && parseFloat(m2[1]) > 0) return parseFloat(m2[1]);
     const m3 = text.match(/现\s*金\s*(?:账\s*户|支\s*付)?[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)\s*元/);
@@ -331,7 +331,7 @@ function parseTotal(ocrText) {
     if (m11 && parseFloat(m11[1]) > 0) return parseFloat(m11[1]);
     const m12 = text.match(/微\s*信(?:支\s*付)?[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)(?!\d)/);
     if (m12 && parseFloat(m12[1]) > 0) return parseFloat(m12[1]);
-    const m13 = text.match(/现\s*金[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)(?!\d)/);
+    const m13 = text.match(/现\s*金\s*(?:账\s*户|支\s*付)?[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)(?!\d)/);
     if (m13 && parseFloat(m13[1]) > 0) return parseFloat(m13[1]);
     const m14 = text.match(/支\s*付\s*宝(?:付|支\s*付)?[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)(?!\d)/);
     if (m14 && parseFloat(m14[1]) > 0) return parseFloat(m14[1]);

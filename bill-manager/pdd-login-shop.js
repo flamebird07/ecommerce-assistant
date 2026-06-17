@@ -75,94 +75,63 @@ async function main() {
       console.log('已检测到登录状态');
     }
 
-    await sleep(5000);
+    await sleep(3000);
 
-    // 获取店铺名称
+    // 获取店铺名称 - 直接从当前页面获取，不跳转
     console.log('获取店铺名称...');
     let shopName = '';
 
-    // 方法1: 直接访问店铺信息页面
-    console.log('访问店铺信息页面...');
-    await page.goto('https://mms.pinduoduo.com/setting/shop-info', { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await sleep(5000);
-
+    // 从页面右上角获取店铺名
     shopName = await page.evaluate(() => {
-      // 查找包含"店铺名称"标签对应的值
-      const labels = document.querySelectorAll('label, .label, [class*="label"]');
-      for (const label of labels) {
-        const text = label.innerText?.trim();
-        if (text && (text.includes('店铺名称') || text === '店铺名')) {
-          // 找同级或相邻的值元素
-          const parent = label.closest('.form-item, .form-group, .item, [class*="form"]') || label.parentElement;
-          if (parent) {
-            const valueEl = parent.querySelector('.value, .content, input, [class*="value"]');
-            if (valueEl) {
-              const val = valueEl.value || valueEl.innerText?.trim();
-              if (val && val.length >= 2) return val;
-            }
+      const allElements = [...document.querySelectorAll('span, a, div, p')];
+      // 方法1: 找"规则中心"右边的元素
+      let ruleRect = null;
+      for (const el of allElements) {
+        const text = el.innerText?.trim();
+        if (text === '规则中心') {
+          ruleRect = el.getBoundingClientRect();
+          break;
+        }
+      }
+
+      if (ruleRect) {
+        const candidates = [];
+        for (const el of allElements) {
+          if (el.children.length > 2) continue;
+          const text = el.textContent?.trim();
+          const rect = el.getBoundingClientRect();
+          if (text && text.length >= 2 && text.length <= 15 &&
+              Math.abs(rect.top - ruleRect.top) < 25 &&
+              rect.left > ruleRect.right + 5 &&
+              rect.height > 10 && rect.height < 45 &&
+              !text.includes('规则') && !text.includes('跨境') &&
+              !text.includes('社区') && !text.includes('团购') &&
+              !text.includes('消息') && !text.includes('帮助') &&
+              !text.includes('客服') && !text.includes('退出')) {
+            candidates.push({ text, left: rect.left });
           }
         }
+        candidates.sort((a, b) => a.left - b.left);
+        if (candidates.length > 0) return candidates[0].text;
       }
-      // 查找所有input，找有店铺名称提示的
-      const inputs = document.querySelectorAll('input[type="text"], input:not([type])');
-      for (const input of inputs) {
-        const placeholder = input.placeholder || '';
-        const label = input.getAttribute('aria-label') || '';
-        if (placeholder.includes('店铺') || label.includes('店铺')) {
-          if (input.value && input.value.length >= 2) return input.value.trim();
-        }
+
+      // 方法2: 找页面标题或店铺名显示区域
+      const titleEl = document.querySelector('h1, h2, .shop-name, [class*="shop-name"]');
+      if (titleEl) {
+        const text = titleEl.textContent?.trim();
+        if (text && text.length >= 2 && text.length <= 15) return text;
       }
+
       return '';
     });
 
-    // 方法2: 从页面右上角获取（规则中心右边）
-    if (!shopName) {
-      console.log('尝试从右上角获取店铺名...');
-      shopName = await page.evaluate(() => {
-        const allElements = [...document.querySelectorAll('span, a, div, p')];
-        // 先找到"规则中心"的位置
-        let ruleRect = null;
-        for (const el of allElements) {
-          const text = el.innerText?.trim();
-          if (text === '规则中心') {
-            ruleRect = el.getBoundingClientRect();
-            break;
-          }
-        }
-
-        if (ruleRect) {
-          // 收集规则中心同一行、右边的叶子元素（innerText没有子元素文本），按left排序
-          const candidates = [];
-          for (const el of allElements) {
-            // 只取叶子节点或接近叶子的元素
-            if (el.children.length > 2) continue;
-            const text = el.textContent?.trim();
-            const rect = el.getBoundingClientRect();
-            if (text && text.length >= 2 && text.length <= 15 &&
-                Math.abs(rect.top - ruleRect.top) < 25 &&
-                rect.left > ruleRect.right + 5 &&
-                rect.height > 10 && rect.height < 45 &&
-                !text.includes('规则') && !text.includes('跨境') &&
-                !text.includes('社区') && !text.includes('团购') &&
-                !text.includes('消息') && !text.includes('帮助') &&
-                !text.includes('客服') && !text.includes('退出')) {
-              candidates.push({ text, left: rect.left });
-            }
-          }
-          candidates.sort((a, b) => a.left - b.left);
-          if (candidates.length > 0) return candidates[0].text;
-        }
-
-        return '';
-      });
-    }
-
     if (!shopName || shopName.includes('退出') || shopName.includes('登录') || shopName.includes('逾期')) {
-      // 最后尝试：截图让用户确认
-      await page.screenshot({ path: path.join(__dirname, 'pdd-shop-name.png') });
-      console.log('无法自动获取店铺名称，已截图 pdd-shop-name.png');
+      console.log('无法自动获取店铺名称，使用默认名称');
       shopName = '未知拼多多店铺';
     }
+
+    // 清理店铺名称：去掉"主账号"、"子账号"等后缀
+    shopName = shopName.replace(/主账号$/, '').replace(/子账号$/, '').trim();
 
     console.log(`店铺名称: ${shopName}`);
 
@@ -172,7 +141,8 @@ async function main() {
     const cookiePath = path.join(COOKIES_DIR, `${safeName}.json`);
     fs.writeFileSync(cookiePath, JSON.stringify(cookies, null, 2));
     console.log(`Cookie已保存: ${cookiePath}`);
-    console.log(`SHOP_NAME:${safeName}`);
+    // 使用stderr输出SHOP_NAME，避免stdout缓冲问题
+    process.stderr.write(`SHOP_NAME:${safeName}\n`);
 
     await browser.close();
     process.exit(0);

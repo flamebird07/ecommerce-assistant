@@ -12,6 +12,12 @@ const PORT = 3000;
 const WORKSPACE = __dirname;
 const COOKIES_DIR = path.join(__dirname, 'cookies');
 
+// ========== 自动关机状态 ==========
+// 用内存标志位记录关机计划，避免 check 接口产生副作用（旧的 /check-shutdown
+// 实现会执行 shutdown /a，反而把已安排的关机取消了）
+let shutdownScheduledAt = null; // 记录调度关机的时间戳（ms），null 表示未调度
+const SHUTDOWN_DELAY_SEC = 60;  // 关机倒计时秒数，需与前端提示保持一致
+
 // ========== 防止多实例运行 ==========
 const LOCK_FILE = path.join(WORKSPACE, '.server.lock');
 function checkLock() {
@@ -635,6 +641,7 @@ const server = http.createServer((req, res) => {
 
     // 登录新店铺
     if (req.url === '/login-new-shop' && req.method === 'POST') {
+        isDouyinRunning = true;
         douyinLog('=== 开始登录新店铺 ===');
 
         const loginScript = path.join(WORKSPACE, 'login-shop.js');
@@ -660,6 +667,7 @@ const server = http.createServer((req, res) => {
         });
 
         node.on('close', (code) => {
+            isDouyinRunning = false;
             douyinLog('=== 登录新店铺结束 ===');
             res.writeHead(200, { 'Content-Type': 'application/json' });
             if (code === 0 && shopName) {
@@ -708,9 +716,11 @@ const server = http.createServer((req, res) => {
 
     // 登录新拼多多店铺
     if (req.url === '/login-new-pdd-shop' && req.method === 'POST') {
+        isDouyinRunning = true;
         douyinLog('=== 开始登录拼多多店铺 ===');
         const pddLoginScript = path.join(WORKSPACE, 'pdd-login-shop.js');
         if (!fs.existsSync(pddLoginScript)) {
+            isDouyinRunning = false;
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: false, message: '拼多多登录脚本不存在，请先创建 pdd-login-shop.js' }));
             return;
@@ -719,10 +729,20 @@ const server = http.createServer((req, res) => {
         let shopName = '';
         node.stdout.on('data', (data) => {
             const msg = data.toString().trim();
-            if (msg) { douyinLog(msg); if (msg.startsWith('SHOP_NAME:')) shopName = msg.replace('SHOP_NAME:', ''); }
+            if (msg) douyinLog(msg);
         });
-        node.stderr.on('data', (data) => { const msg = data.toString().trim(); if (msg) douyinLog('[错误] ' + msg); });
+        node.stderr.on('data', (data) => {
+            const msg = data.toString().trim();
+            if (msg) {
+                if (msg.startsWith('SHOP_NAME:')) {
+                    shopName = msg.replace('SHOP_NAME:', '');
+                } else {
+                    douyinLog('[错误] ' + msg);
+                }
+            }
+        });
         node.on('close', (code) => {
+            isDouyinRunning = false;
             douyinLog('=== 登录拼多多店铺结束 ===');
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(code === 0 && shopName ? { success: true, shopName } : { success: false, message: '登录失败或超时' }));
@@ -746,6 +766,13 @@ const server = http.createServer((req, res) => {
         isDouyinRunning = true;
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true, message: '已启动' }));
+        // 防止卡死：如果10秒内进程还没启动，重置标志
+        const pddSafetyTimer = setTimeout(() => {
+            if (isDouyinRunning && !currentProcess) {
+                isDouyinRunning = false;
+                douyinLog('[安全] 超时重置 isDouyinRunning (PDD)');
+            }
+        }, 10000);
         let body = '';
         req.on('data', chunk => body += chunk);
         req.on('end', () => {
@@ -774,7 +801,24 @@ const server = http.createServer((req, res) => {
             currentProcess = node;
             node.stdout.on('data', (data) => { const msg = data.toString().trim(); if (msg) douyinLog(msg); });
             node.stderr.on('data', (data) => { const msg = data.toString().trim(); if (msg) douyinLog('[错误] ' + msg); });
-            node.on('close', (code) => { currentProcess = null; isDouyinRunning = false; douyinLog('=== 拼多多商品获取结束 ==='); });
+            node.on('close', (code) => {
+                clearTimeout(pddSafetyTimer);
+                currentProcess = null;
+                isDouyinRunning = false;
+                // 检测cookie过期标记文件，自动删除过期店铺
+                const markerFile = path.join(WORKSPACE, 'cookie_expired.txt');
+                try {
+                    if (fs.existsSync(markerFile)) {
+                        const expiredShop = fs.readFileSync(markerFile, 'utf8').trim();
+                        if (expiredShop) {
+                            removeShop(expiredShop);
+                            douyinLog(`Cookie已过期，自动删除店铺: ${expiredShop}`);
+                        }
+                        fs.unlinkSync(markerFile);
+                    }
+                } catch (e) {}
+                douyinLog('=== 拼多多商品获取结束 ===');
+            });
         });
         return;
     }
@@ -801,28 +845,33 @@ const server = http.createServer((req, res) => {
 
     // 定时关机（60秒后）
     if (req.url === '/schedule-shutdown' && req.method === 'POST') {
-        log('=== 60秒后自动关机 ===');
-        spawn('shutdown', ['-s', '-t', '60'], { shell: true });
+        log(`=== ${SHUTDOWN_DELAY_SEC}秒后自动关机 ===`);
+        spawn('shutdown', ['-s', '-t', String(SHUTDOWN_DELAY_SEC)], { shell: true });
+        shutdownScheduledAt = Date.now(); // 记录调度时间
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true }));
         return;
     }
 
-    // 检查关机状态
+    // 检查关机状态（只读，不产生副作用）
     if (req.url === '/check-shutdown' && req.method === 'GET') {
-        // 简单检查：尝试执行 shutdown /a（取消关机）
-        // 如果成功，说明之前有关机计划；如果失败，说明没有关机计划
-        try {
-            const { execSync } = require('child_process');
-            execSync('shutdown /a', { encoding: 'utf8', timeout: 1000 });
-            // 执行成功说明有关机计划，但现在已取消
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({
-                shutdownScheduled: true,
-                shutdownTime: '已取消'
-            }));
-        } catch (e) {
-            // 执行失败说明没有关机计划
+        if (shutdownScheduledAt) {
+            // 根据调度时间计算剩余秒数；若已超过延迟时间，说明早已关机或被外部取消
+            const elapsed = Math.floor((Date.now() - shutdownScheduledAt) / 1000);
+            const remaining = SHUTDOWN_DELAY_SEC - elapsed;
+            if (remaining > 0) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    shutdownScheduled: true,
+                    shutdownTime: `${remaining}秒后`
+                }));
+            } else {
+                // 倒计时已过但服务还在运行，说明关机被外部取消，清理标志位
+                shutdownScheduledAt = null;
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ shutdownScheduled: false }));
+            }
+        } else {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ shutdownScheduled: false }));
         }
@@ -832,6 +881,7 @@ const server = http.createServer((req, res) => {
     // 取消关机
     if (req.url === '/cancel-shutdown' && req.method === 'POST') {
         spawn('shutdown', ['/a'], { shell: true });
+        shutdownScheduledAt = null; // 清理标志位
         log('=== 已取消自动关机 ===');
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true }));
