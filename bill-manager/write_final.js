@@ -178,6 +178,10 @@ function parseShopName(ocrText) {
         if (stripped === '客户联' || stripped === '存根联' || stripped === '客户版') continue;
         if (stripped === '销售明细' || stripped === '销售/退货明细') continue;
         if (stripped === '销售单' || stripped === '退货单' || stripped === '销售退货单') continue;
+        // 跳过状态标记词
+        if (['草稿', '打印', '复制', '作废', '已打印', '已作废'].includes(stripped)) continue;
+        // 跳过单据类型行
+        if (['批发单', '进货单', '采购单'].includes(stripped)) continue;
         // 跳过UI元素和无关行
         if (/^[<🔔]/.test(stripped)) continue;
         if (/小票详情|切换样式|开通线上|一键邀请|复制$/.test(stripped)) continue;
