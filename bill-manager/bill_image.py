@@ -89,6 +89,9 @@ def parse_shop_name(text):
         s = re.sub(r'^```[a-zA-Z]*', '', s).strip()  # 去掉 Markdown 代码块前缀
         s = re.sub(r'^#+\s*', '', s).strip()  # 去掉 Markdown 标题前缀
         if not s or s=='```' or s in ('销售明细','销售/退货明细','销售单','退货单','销售退货单'): continue
+        # 跳过进销存软件名称和无关行
+        if s in ('秦丝', '商陆花', '笑铺日记'): continue
+        if re.search(r'qinsilk\.com|shanluhua|一笑铺日记', s): continue
         # 跳过UI元素和无关行
         if re.match(r'^[<🔔]', s): continue
         if re.search(r'小票详情|切换样式|开通线上|一键邀请|复制$', s): continue
@@ -119,14 +122,24 @@ def parse_shop_name(text):
     # 如果上面都没匹配到，尝试取第一行作为店名（去掉数字后缀）
     if result is None:
         lines = text.split('\n')
-        for line in lines:
+        bill_types = ['销售单', '销售', '退货单', '退货', '收款单', '收款', '批发单', '批发']
+        skip_words = ('草稿', '客户联', '存根', '副本', '原件', '原件联', '记账联', '收据联', '单据')
+        for i, line in enumerate(lines):
             s = line.strip().replace('客户联','').replace('存根联','').strip()
             s = re.sub(r'^```[a-zA-Z]*', '', s).strip()
             s = re.sub(r'^#+\s*', '', s).strip()  # 去掉 Markdown 标题前缀
             s = re.sub(r'[（()）【】\[\]]+', '', s)  # 去掉括号
-            s = re.sub(r'\s*(?:销售退货单|退货单|销售单|收款单)\s*$', '', s).strip()  # 去掉销售单后缀
+            s = re.sub(r'\s*(?:销售退货单|退货单|销售单|收款单)\s*$', '', s).strip()
             s = re.sub(r'\s*(?:客户联|存根联)\s*$', '', s).strip()
-            s = re.sub(r'\s*(?:销售退货单|退货单|销售单|收款单)\s*$', '', s).strip()  # 客户联去掉后再清一次
+            s = re.sub(r'\s*(?:销售退货单|退货单|销售单|收款单)\s*$', '', s).strip()
+            if s in ('草稿', '客户联', '存根', '副本', '原件', '原件联', '记账联', '收据联', '单据'):
+                continue
+            if i + 1 < len(lines) and re.match(r'^[\u4e00-\u9fa5]{2,6}$', s):
+                next_line = lines[i + 1].strip()
+                bill_types = ['销售单', '销售', '退货单', '退货', '收款单', '收款', '批发单', '批发']
+                if any(next_line == bt or next_line.startswith(bt) for bt in bill_types):
+                    result = s
+                    break
             if s and len(s) >= 2:
                 n = re.sub(r'(欧洲城店|欧洲城|国际面料城|万象汇|万象会|世贸|万达|广场|商城|合泰轻纺城|和泰轻纺城)', '', s)
                 n = re.sub(r'(女裤|裤业|时尚女装)\s*$', '', n)
@@ -134,7 +147,6 @@ def parse_shop_name(text):
                 if n:
                     result = n
                     break
-    # 特例：婉星 -> 婉星儿（所有路径统一处理）
     if result == '婉星':
         result = '婉星儿'
     # 特例：梦莎娜熙恒 -> 梦莎娜

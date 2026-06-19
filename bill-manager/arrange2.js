@@ -260,13 +260,33 @@ async function syncRecordToDstTable(srcRecord, recordIndex) {
 
     // 构建要写入的字段（全部照搬，只记录时间用当前时间）
     const toNum2 = v => v != null && v !== '' ? Number(v) : null;
-    // 生成档口缩写，失败则中断整条记录处理
-    const abbr = getPinyinInitials(shop);
+    // 生成档口缩写，失败则从3号表格查询
+    let abbr = getPinyinInitials(shop);
     if (!abbr || /[一-龥]/.test(abbr)) {
-        console.error(`  [${recordIndex}] 跳过 ${shop} ${batch}（缩写生成失败）`);
-        await updateRecord(SRC_TABLE, srcRecord.id, { '是否错误': '' });
-        await sleep(200);
-        return false;
+        console.log(`  [${recordIndex}] 拼音转换失败，从3号表格查询档口"${shop}"的缩写`);
+        let tbl3Pt = '';
+        do {
+            const list = await listRecords(TBL3_TABLE, 100, tbl3Pt);
+            if (list.data?.items) {
+                for (const item of list.data.items) {
+                    const s = (getText(item.fields['档口名称']) || '').trim();
+                    if (s === shop.trim()) {
+                        abbr = getText(item.fields['档口缩写']) || '';
+                        if (abbr) {
+                            console.log(`  [${recordIndex}] 从3号表格获取缩写: ${abbr}`);
+                            break;
+                        }
+                    }
+                }
+            }
+            tbl3Pt = list.data?.page_token || '';
+        } while (tbl3Pt && !abbr);
+        if (!abbr) {
+            console.error(`  [${recordIndex}] 跳过 ${shop} ${batch}（3号表格未找到缩写）`);
+            await updateRecord(SRC_TABLE, srcRecord.id, { '是否错误': '' });
+            await sleep(200);
+            return false;
+        }
     }
 
     // 校验档口名称是否仍含地址信息（楼层房号等）
@@ -285,7 +305,7 @@ async function syncRecordToDstTable(srcRecord, recordIndex) {
         '批次号': batch,
         '上次结余': toNum2(f['上次结余']),
         '累计结余': toNum2(f['累计结余']),
-        '付款金额': toNum2(f['付款金额']),
+        '付款金额': (() => { const v = toNum2(f['付款金额']); return (v && v !== 0) ? v : extractPaymentAmount(getText(f['单据内容'])); })(),
         '地址': getText(f['地址']),
         '单据内容': getText(f['单据内容']),
         '客户': getText(f['客户']),
@@ -653,8 +673,8 @@ function extractGoodsCost(text, shopAbbr) {
             }
             // 跳过过短的款号（少于2个字符）
             if (codeStr.length < 2) continue;
-            // 如果款号不以缩写开头，加上档口拼音缩写
-            if (shopAbbr && !codeStr.startsWith(shopAbbr)) codeStr = shopAbbr + codeStr;
+            // 如果款号不以缩写开头，加上档口拼音缩写（仅当缩写是纯字母时）
+            if (shopAbbr && /^[a-zA-Z]+$/.test(shopAbbr) && !codeStr.startsWith(shopAbbr)) codeStr = shopAbbr + codeStr;
             results.push({ code: codeStr, cost: unitPrice });
         }
     }
@@ -676,9 +696,35 @@ async function syncToTbl4(srcRecord, srcTime) {
     if (shopName === '婉星') shopName = '婉星儿';
     if (shopName === '梦莎娜熙恒') shopName = '梦莎娜';
     if (shopName === '喜梦露') shopName = '荷传';
-    const shopAbbr = getPinyinInitials(shopName) || shopName.substring(0, 2);
-    console.log(`  [4号] 档口=${shopName} 缩写=${shopAbbr}`);
+    let shopAbbr = getPinyinInitials(shopName);
+    // 拼音转换失败时，从3号表格查询档口缩写
+    if (!shopAbbr || /[一-龥]/.test(shopAbbr)) {
+        console.log(`  [4号] 拼音转换失败，从3号表格查询档口"${shopName}"的缩写`);
+        let tbl3Pt = '';
+        do {
+            const list = await listRecords(TBL3_TABLE, 100, tbl3Pt);
+            if (list.data?.items) {
+                for (const item of list.data.items) {
+                    const s = (getText(item.fields['档口名称']) || '').trim();
+                    if (s === shopName.trim()) {
+                        shopAbbr = getText(item.fields['档口缩写']) || '';
+                        if (shopAbbr) {
+                            console.log(`  [4号] 从3号表格获取缩写: ${shopAbbr}`);
+                            break;
+                        }
+                    }
+                }
+            }
+            tbl3Pt = list.data?.page_token || '';
+        } while (tbl3Pt && !shopAbbr);
+        if (!shopAbbr) {
+            console.log(`  [4号] 3号表格未找到缩写，跳过写入`);
+            return 0;
+        }
+    }
+    console.log(`  [4号] 档口=${shopName} 缩写=${shopAbbr || '(无)'}`);
 
+    // 提取商品信息
     const goods = extractGoodsCost(content, shopAbbr);
     if (goods.length === 0) {
         console.log(`  [4号] 无商品信息`);

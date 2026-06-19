@@ -182,6 +182,9 @@ function parseShopName(ocrText) {
         if (['草稿', '打印', '复制', '作废', '已打印', '已作废'].includes(stripped)) continue;
         // 跳过单据类型行
         if (['批发单', '进货单', '采购单'].includes(stripped)) continue;
+        // 跳过进销存软件名称和无关行
+        if (['秦丝', '商陆花', '笑铺日记'].includes(stripped)) continue;
+        if (/qinsilk\.com|shanluhua|一笑铺日记/.test(stripped)) continue;
         // 跳过UI元素和无关行
         if (/^[<🔔]/.test(stripped)) continue;
         if (/小票详情|切换样式|开通线上|一键邀请|复制$/.test(stripped)) continue;
@@ -333,7 +336,7 @@ function parseTotal(ocrText) {
     if (m10) return parseFloat(m10[1]);
     const m11 = text.match(/(?:实\s*付|已\s*付|付\s*款)[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)(?!\d)/);
     if (m11 && parseFloat(m11[1]) > 0) return parseFloat(m11[1]);
-    const m12 = text.match(/微\s*信(?:支\s*付)?[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)(?!\d)/);
+    const m12 = text.match(/微\s*信(?:账\s*户|支\s*付)?[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)(?!\d)/);
     if (m12 && parseFloat(m12[1]) > 0) return parseFloat(m12[1]);
     const m13 = text.match(/现\s*金\s*(?:账\s*户|支\s*付)?[:：\s]*[¥￥]?\s*(-?\d{1,8}(?:\.\d{1,2})?)(?!\d)/);
     if (m13 && parseFloat(m13[1]) > 0) return parseFloat(m13[1]);
