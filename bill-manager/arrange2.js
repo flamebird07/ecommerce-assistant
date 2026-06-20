@@ -297,6 +297,22 @@ async function syncRecordToDstTable(srcRecord, recordIndex) {
         return false;
     }
 
+    const salesQty = toNum2(f['拿货件数']) || 0;
+    const returnQty = toNum2(f['退货件数']) || 0;
+    const paymentAmt = (() => { const v = toNum2(f['付款金额']); return (v && v !== 0) ? v : extractPaymentAmount(getText(f['单据内容'])); })() || 0;
+
+    // 判断单据性质
+    let billType = '';
+    if (salesQty > 0 && returnQty === 0) {
+        billType = '拿货单';
+    } else if (salesQty === 0 && returnQty > 0) {
+        billType = '退货单';
+    } else if (salesQty > 0 && returnQty > 0) {
+        billType = '混合单';
+    } else if (salesQty === 0 && returnQty === 0 && paymentAmt > 0) {
+        billType = '付款单';
+    }
+
     const fields = {
         '档口名称': shop,
         '档口缩写': abbr,
@@ -305,12 +321,13 @@ async function syncRecordToDstTable(srcRecord, recordIndex) {
         '批次号': batch,
         '上次结余': toNum2(f['上次结余']),
         '累计结余': toNum2(f['累计结余']),
-        '付款金额': (() => { const v = toNum2(f['付款金额']); return (v && v !== 0) ? v : extractPaymentAmount(getText(f['单据内容'])); })(),
+        '付款金额': paymentAmt,
         '地址': getText(f['地址']),
         '单据内容': getText(f['单据内容']),
         '客户': getText(f['客户']),
-        '拿货件数': toNum2(f['拿货件数']),
-        '退货件数': toNum2(f['退货件数']),
+        '拿货件数': salesQty,
+        '退货件数': returnQty,
+        '单据性质': billType,
         '记录时间': Date.now()
     };
 
