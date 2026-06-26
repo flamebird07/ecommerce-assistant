@@ -64,15 +64,13 @@ function getPinyinInitials(chinese) {
     if (chinese === '欣焯怡') return 'XZY';
     if (chinese === '靓点红怡纯') return 'LDHYC';
     try {
-        const tmp = path.join(__dirname, '_pinyin_input.txt');
-        fs.writeFileSync(tmp, chinese, 'utf-8');
+        const script = path.join(__dirname, 'pinyin_initials.py');
         const result = execSync(
-            `python -W ignore -c "import sys; sys.path.insert(0, r'${__dirname.replace(/\\/g, '\\\\')}'); from bill_check import get_pinyin_initials; t=open(r'${tmp}',encoding='utf-8').read(); print(get_pinyin_initials(t),end='')"`,
+            `python -W ignore "${script}" "${chinese}"`,
             { encoding: 'utf-8', timeout: 5000, env: { ...process.env, PYTHONWARNINGS: 'ignore' } }
         );
-        fs.unlinkSync(tmp);
         const initials = result.trim();
-        // 如果返回空或仍含中文，说明拼音失败，改用全中文名（不用substring）
+        // 如果返回空或仍含中文，说明拼音失败
         if (!initials || /[一-龥]/.test(initials)) return '';
         return initials;
     } catch (e) {
@@ -930,17 +928,12 @@ async function main() {
     }
     console.log(`共 ${all.length} 条`);
 
-    // 筛选有效：
-    // 1. 是否错误字段为空（空白字符也算空）的记录才保留
-    // 2. 如果是"拿货件数没有识别"的错误，重新处理
+    // 筛选有效：是否错误字段为空（空白字符也算空）的记录才保留
     const valid = all.filter(r => {
         const err = getText(r.fields['是否错误']);
-        // 如果没有错误，保留
-        if (!err || !err.trim()) return true;
-        // 如果是特定错误，重新处理
-        if (err.includes('拿货件数') || err.includes('档口名称') || err.includes('重复跳过')) return true;
-        // 其他错误不处理
-        return false;
+        // 严格遵守：是否错误项有任何内容（包括空格）都跳过
+        if (err && err.trim()) return false;
+        return true;
     });
     console.log(`有效: ${valid.length} 条`);
 

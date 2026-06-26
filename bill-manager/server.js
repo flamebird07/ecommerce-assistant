@@ -59,7 +59,8 @@ process.on('SIGTERM', () => { releaseLock(); process.exit(0); });
 
 // 日志文件
 const LOG_FILE = path.join(WORKSPACE, 'bill.log');
-const DOUYIN_LOG_FILE = path.join(WORKSPACE, 'douyin.log');
+const SHOP_LOG_FILE = path.join(WORKSPACE, 'shop.log');  // 店铺商品分析日志（抖店+拼多多+自动化）
+const DOUYIN_LOG_FILE = path.join(WORKSPACE, 'douyin.log'); // 旧日志文件，保留兼容
 
 // 图片目录配置文件
 const DIR_CONFIG_FILE = path.join(WORKSPACE, 'dir_config.json');
@@ -97,8 +98,11 @@ function removeShop(shopName) {
     return false;
 }
 
-// 当前运行的子进程
-let currentProcess = null;
+// 当前运行的子进程（按任务类型分开管理）
+let billProcess = null;        // 票据录入/整理进程
+let douyinProcess = null;      // 抖音单次分析进程
+let douyinMultiProcess = null; // 抖音多次执行进程
+let pddProcess = null;         // 拼多多进程
 let isBillCheckRunning = false;
 let isDouyinRunning = false;
 let isDouyinMultiRunning = false;
@@ -137,14 +141,17 @@ function getLogs() {
 function logToFile(msg, filePath) {
     const targetFile = filePath || LOG_FILE;
     const time = new Date().toISOString();
-    // 清理消息中的特殊字符，确保JSON安全
+    // 清理消息中的特殊字符，确保JSON安全（保留换行符\n）
     const clean = msg
         .replace(/[\r]/g, '')
         .replace(/\\/g, '/')
         .replace(/"/g, "'")
-        .replace(/[\x00-\x1f\x7f-\x9f]/g, '')
-        .substring(0, 500);
-    fs.appendFileSync(targetFile, `[${time}] ${clean}\n`);
+        .replace(/[\x00-\x09\x0b-\x1f\x7f-\x9f]/g, '')  // 保留0x0A(\n)
+        .substring(0, 2000);  // 增加长度限制
+    // 处理多行日志：每行都添加时间戳
+    const lines = clean.split('\n');
+    const logLines = lines.map(line => `[${time}] ${line}`);
+    fs.appendFileSync(targetFile, logLines.join('\n') + '\n');
     // 日志轮转：超过5MB时截断
     try {
         const stats = fs.statSync(targetFile);
@@ -165,6 +172,11 @@ function log(msg) {
 function douyinLog(msg) {
     console.log(msg);
     logToFile(msg, DOUYIN_LOG_FILE);
+}
+
+function shopLog(msg) {
+    console.log(msg);
+    logToFile(msg, SHOP_LOG_FILE);
 }
 
 // 路由处理
@@ -210,53 +222,75 @@ const server = http.createServer((req, res) => {
 
     // 查询进程状态
     if (req.url === '/get-process-status' && req.method === 'GET') {
+        const shopRunning = isDouyinRunning || isDouyinMultiRunning || !!pddProcess;
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ running: isBillCheckRunning || isDouyinRunning }));
+        res.end(JSON.stringify({
+            running: isBillCheckRunning || shopRunning,
+            billRunning: isBillCheckRunning,
+            shopRunning,
+            douyinRunning: isDouyinRunning  // 保留兼容
+        }));
         return;
     }
 
-    // 停止进程
-    if (req.url === '/stop-process' && req.method === 'POST') {
+    // 停止票据进程（只杀票据，不影响商品分析）
+    if (req.url === '/stop-bill' && req.method === 'POST') {
         let stopped = false;
-        let wasDouyinProcess = isDouyinRunning || isDouyinMultiRunning;
-        // 先清除运行标志
         if (isBillCheckRunning) {
             isBillCheckRunning = false;
             log('票据录入状态已重置');
             stopped = true;
         }
+        if (billProcess) {
+            if (process.platform === 'win32') {
+                spawn('taskkill', ['/T', '/F', '/PID', billProcess.pid.toString()]);
+            } else {
+                billProcess.kill('SIGTERM');
+            }
+            log('票据进程已终止');
+            billProcess = null;
+            stopped = true;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: stopped, message: stopped ? '已停止票据进程' : '没有运行中的票据进程' }));
+        return;
+    }
+
+    // 停止商品分析进程（只杀抖店/拼多多，不影响票据）
+    if (req.url === '/stop-shop' && req.method === 'POST') {
+        let stopped = false;
         if (isDouyinRunning) {
             isDouyinRunning = false;
-            douyinLog('抖店商品获取状态已重置');
+            shopLog('商品获取状态已重置');
             stopped = true;
         }
         if (isDouyinMultiRunning) {
             isDouyinMultiRunning = false;
-            douyinLog('抖店商品多次执行状态已重置');
+            shopLog('商品多次执行状态已重置');
             stopped = true;
         }
-        // 再终止实际的 node 进程（Windows 需杀掉整个进程树）
-        if (currentProcess) {
-            if (process.platform === 'win32') {
-                spawn('taskkill', ['/T', '/F', '/PID', currentProcess.pid.toString()]);
-            } else {
-                currentProcess.kill('SIGTERM');
+        // 终止商品分析相关的进程（Windows 需杀掉整个进程树）
+        const shopProcesses = [
+            { proc: douyinProcess, name: '抖音' },
+            { proc: douyinMultiProcess, name: '抖音多次' },
+            { proc: pddProcess, name: '拼多多' }
+        ];
+        for (const { proc, name } of shopProcesses) {
+            if (proc) {
+                if (process.platform === 'win32') {
+                    spawn('taskkill', ['/T', '/F', '/PID', proc.pid.toString()]);
+                } else {
+                    proc.kill('SIGTERM');
+                }
+                shopLog(`${name}进程已终止`);
+                stopped = true;
             }
-            if (wasDouyinProcess) {
-                douyinLog('进程已终止');
-            } else {
-                log('进程已终止');
-            }
-            currentProcess = null;
-            stopped = true;
         }
-        if (stopped) {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: true, message: '已停止' }));
-        } else {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: false, message: '没有运行中的进程' }));
-        }
+        douyinProcess = null;
+        douyinMultiProcess = null;
+        pddProcess = null;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: stopped, message: stopped ? '已停止商品分析进程' : '没有运行中的商品分析进程' }));
         return;
     }
 
@@ -329,7 +363,7 @@ const server = http.createServer((req, res) => {
             cwd: WORKSPACE,
             env: { ...process.env, PYTHONUNBUFFERED: '1' }
         });
-        currentProcess = py;
+        billProcess = py;
 
         py.stdout.on('data', (data) => {
             const msg = data.toString().trim();
@@ -346,7 +380,7 @@ const server = http.createServer((req, res) => {
 
         py.on('close', (code) => {
             isBillCheckRunning = false;
-            currentProcess = null;
+            billProcess = null;
             log('=== 录入票据结束 ===');
         });
         return;
@@ -375,7 +409,7 @@ const server = http.createServer((req, res) => {
             cwd: WORKSPACE,
             env: { ...process.env, NODE_OPTIONS: '' }
         });
-        currentProcess = node;
+        billProcess = node;
 
         node.stdout.on('data', (data) => {
             const msg = data.toString().trim();
@@ -388,7 +422,7 @@ const server = http.createServer((req, res) => {
         });
 
         node.on('close', (code) => {
-            currentProcess = null;
+            billProcess = null;
             isBillCheckRunning = false;
             log('=== 整理票据结束 ===');
         });
@@ -399,13 +433,13 @@ const server = http.createServer((req, res) => {
     if (req.url === '/run-douyin-analyzer' && req.method === 'POST') {
         // 智能检查：如果标志为true但进程不存在，重置标志
         if (isDouyinRunning) {
-            if (currentProcess) {
+            if (douyinProcess) {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ success: false, message: '已有运行的进程' }));
                 return;
             } else {
                 // 进程不存在但标志未重置，强制重置
-                douyinLog('[修复] 检测到标志未重置，强制重置 isDouyinRunning');
+                shopLog('[修复] 检测到标志未重置，强制重置 isDouyinRunning');
                 isDouyinRunning = false;
             }
         }
@@ -413,9 +447,9 @@ const server = http.createServer((req, res) => {
         isDouyinRunning = true;
         // 防止卡死：如果10秒内进程还没启动，重置标志
         const douyinSafetyTimer = setTimeout(() => {
-            if (isDouyinRunning && !currentProcess) {
+            if (isDouyinRunning && !douyinProcess) {
                 isDouyinRunning = false;
-                douyinLog('[安全] 超时重置 isDouyinRunning');
+                shopLog('[安全] 超时重置 isDouyinRunning');
             }
         }, 10000);
 
@@ -443,7 +477,7 @@ const server = http.createServer((req, res) => {
                 shippingFee = parseFloat(parsed.shippingFee) || 2.1;
                 insurance = parseFloat(parsed.insurance) || 4.01;
             } catch (e) {}
-            douyinLog(`=== 开始获取抖店商品信息 (目标${targetCount}个) [${shopName}] ===`);
+            shopLog(`=== 开始获取抖店商品信息 (目标${targetCount}个) [${shopName}] ===`);
 
             // 将店铺名写入临时文件（用Buffer写入确保编码正确）
             const shopNameFile = path.join(WORKSPACE, 'current_shop.txt');
@@ -458,7 +492,7 @@ const server = http.createServer((req, res) => {
                 shell: true,
                 cwd: WORKSPACE
             });
-            currentProcess = node;
+            douyinProcess = node;
             clearTimeout(douyinSafetyTimer);
 
             node.stdout.on('data', (data) => {
@@ -467,24 +501,24 @@ const server = http.createServer((req, res) => {
                 for (const line of lines) {
                     const msg = line.trim();
                     if (!msg) continue;
-                    douyinLog(msg);
+                    shopLog(msg);
                     if (msg.indexOf('COOKIE_EXPIRED:') !== -1) {
                         const idx = msg.indexOf('COOKIE_EXPIRED:');
                         const expiredShop = msg.substring(idx + 'COOKIE_EXPIRED:'.length).trim();
-                        douyinLog(`[DEBUG] 检测到过期信号, 店铺=${expiredShop}`);
+                        shopLog(`[DEBUG] 检测到过期信号, 店铺=${expiredShop}`);
                         if (expiredShop) {
                             const safeName = expiredShop.replace(/[\\/:*?"<>|]/g, '_');
                             const cookieFile = path.join(COOKIES_DIR, safeName + '.json');
-                            douyinLog(`[DEBUG] cookie文件: ${cookieFile}, 存在=${fs.existsSync(cookieFile)}`);
+                            shopLog(`[DEBUG] cookie文件: ${cookieFile}, 存在=${fs.existsSync(cookieFile)}`);
                             try {
                                 if (fs.existsSync(cookieFile)) {
                                     fs.unlinkSync(cookieFile);
-                                    douyinLog(`Cookie已过期，自动删除店铺: ${expiredShop}`);
+                                    shopLog(`Cookie已过期，自动删除店铺: ${expiredShop}`);
                                 } else {
-                                    douyinLog(`Cookie文件不存在: ${cookieFile}`);
+                                    shopLog(`Cookie文件不存在: ${cookieFile}`);
                                 }
                             } catch (e) {
-                                douyinLog(`删除cookie失败: ${e.message}`);
+                                shopLog(`删除cookie失败: ${e.message}`);
                             }
                         }
                     }
@@ -495,12 +529,12 @@ const server = http.createServer((req, res) => {
                 const lines = data.toString().split('\n');
                 for (const line of lines) {
                     const msg = line.trim();
-                    if (msg) douyinLog('[错误] ' + msg);
+                    if (msg) shopLog('[错误] ' + msg);
                 }
             });
 
             node.on('close', (code) => {
-                currentProcess = null;
+                douyinProcess = null;
                 isDouyinRunning = false;
                 // 检查cookie过期标记文件
                 const markerFile = path.join(WORKSPACE, 'cookie_expired.txt');
@@ -513,12 +547,12 @@ const server = http.createServer((req, res) => {
                             const cookieFile = path.join(COOKIES_DIR, safeName + '.json');
                             if (fs.existsSync(cookieFile)) {
                                 fs.unlinkSync(cookieFile);
-                                douyinLog(`Cookie已过期，自动删除店铺: ${expiredShop}`);
+                                shopLog(`Cookie已过期，自动删除店铺: ${expiredShop}`);
                             }
                         }
-                    } catch (e) { douyinLog(`标记文件处理异常: ${e.message}`); }
+                    } catch (e) { shopLog(`标记文件处理异常: ${e.message}`); }
                 }
-                douyinLog('=== 抖店商品信息获取结束 ===');
+                shopLog('=== 抖店商品信息获取结束 ===');
             });
         });
         return;
@@ -550,7 +584,7 @@ const server = http.createServer((req, res) => {
                 shippingFee = parseFloat(parsed.shippingFee) || 2.1;
                 insurance = parseFloat(parsed.insurance) || 4.01;
             } catch (e) {}
-            douyinLog(`=== 开始多次获取抖店商品信息 (目标${targetCount}个, 间隔${intervalMinutes}分钟) [${shopName}] ===`);
+            shopLog(`=== 开始多次获取抖店商品信息 (目标${targetCount}个, 间隔${intervalMinutes}分钟) [${shopName}] ===`);
 
             // 将店铺名写入临时文件（避免编码问题）
             const shopNameFile = path.join(WORKSPACE, 'current_shop.txt');
@@ -565,7 +599,7 @@ const server = http.createServer((req, res) => {
                 shell: true,
                 cwd: WORKSPACE
             });
-            currentProcess = node;
+            douyinMultiProcess = node;
 
             node.stdout.on('data', (data) => {
                 const raw = data.toString();
@@ -573,21 +607,21 @@ const server = http.createServer((req, res) => {
                 for (const line of lines) {
                     const msg = line.trim();
                     if (!msg) continue;
-                    douyinLog(msg);
+                    shopLog(msg);
                     if (msg.indexOf('COOKIE_EXPIRED:') !== -1) {
                         const idx = msg.indexOf('COOKIE_EXPIRED:');
                         const expiredShop = msg.substring(idx + 'COOKIE_EXPIRED:'.length).trim();
-                        douyinLog(`[DEBUG] 检测到过期信号, 店铺=${expiredShop}`);
+                        shopLog(`[DEBUG] 检测到过期信号, 店铺=${expiredShop}`);
                         if (expiredShop) {
                             const safeName = expiredShop.replace(/[\\/:*?"<>|]/g, '_');
                             const cookieFile = path.join(COOKIES_DIR, safeName + '.json');
                             try {
                                 if (fs.existsSync(cookieFile)) {
                                     fs.unlinkSync(cookieFile);
-                                    douyinLog(`Cookie已过期，自动删除店铺: ${expiredShop}`);
+                                    shopLog(`Cookie已过期，自动删除店铺: ${expiredShop}`);
                                 }
                             } catch (e) {
-                                douyinLog(`删除cookie失败: ${e.message}`);
+                                shopLog(`删除cookie失败: ${e.message}`);
                             }
                         }
                     }
@@ -598,12 +632,12 @@ const server = http.createServer((req, res) => {
                 const lines = data.toString().split('\n');
                 for (const line of lines) {
                     const msg = line.trim();
-                    if (msg) douyinLog('[错误] ' + msg);
+                    if (msg) shopLog('[错误] ' + msg);
                 }
             });
 
             node.on('close', (code) => {
-                currentProcess = null;
+                douyinMultiProcess = null;
                 isDouyinMultiRunning = false;
                 // 检查cookie过期标记文件
                 const markerFile = path.join(WORKSPACE, 'cookie_expired.txt');
@@ -616,12 +650,12 @@ const server = http.createServer((req, res) => {
                             const cookieFile = path.join(COOKIES_DIR, safeName + '.json');
                             if (fs.existsSync(cookieFile)) {
                                 fs.unlinkSync(cookieFile);
-                                douyinLog(`Cookie已过期，自动删除店铺: ${expiredShop}`);
+                                shopLog(`Cookie已过期，自动删除店铺: ${expiredShop}`);
                             }
                         }
                     } catch (e) {}
                 }
-                douyinLog('=== 抖店商品信息多次执行结束 ===');
+                shopLog('=== 抖店商品信息多次执行结束 ===');
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({
                     success: code === 0,
@@ -642,7 +676,7 @@ const server = http.createServer((req, res) => {
     // 登录新店铺
     if (req.url === '/login-new-shop' && req.method === 'POST') {
         isDouyinRunning = true;
-        douyinLog('=== 开始登录新店铺 ===');
+        shopLog('=== 开始登录新店铺 ===');
 
         const loginScript = path.join(WORKSPACE, 'login-shop.js');
         const node = spawn('node', [loginScript], {
@@ -654,7 +688,7 @@ const server = http.createServer((req, res) => {
         node.stdout.on('data', (data) => {
             const msg = data.toString().trim();
             if (msg) {
-                douyinLog(msg);
+                shopLog(msg);
                 if (msg.startsWith('SHOP_NAME:')) {
                     shopName = msg.replace('SHOP_NAME:', '');
                 }
@@ -663,12 +697,12 @@ const server = http.createServer((req, res) => {
 
         node.stderr.on('data', (data) => {
             const msg = data.toString().trim();
-            if (msg) douyinLog('[错误] ' + msg);
+            if (msg) shopLog('[错误] ' + msg);
         });
 
         node.on('close', (code) => {
             isDouyinRunning = false;
-            douyinLog('=== 登录新店铺结束 ===');
+            shopLog('=== 登录新店铺结束 ===');
             res.writeHead(200, { 'Content-Type': 'application/json' });
             if (code === 0 && shopName) {
                 res.end(JSON.stringify({ success: true, shopName }));
@@ -717,7 +751,7 @@ const server = http.createServer((req, res) => {
     // 登录新拼多多店铺
     if (req.url === '/login-new-pdd-shop' && req.method === 'POST') {
         isDouyinRunning = true;
-        douyinLog('=== 开始登录拼多多店铺 ===');
+        shopLog('=== 开始登录拼多多店铺 ===');
         const pddLoginScript = path.join(WORKSPACE, 'pdd-login-shop.js');
         if (!fs.existsSync(pddLoginScript)) {
             isDouyinRunning = false;
@@ -729,7 +763,7 @@ const server = http.createServer((req, res) => {
         let shopName = '';
         node.stdout.on('data', (data) => {
             const msg = data.toString().trim();
-            if (msg) douyinLog(msg);
+            if (msg) shopLog(msg);
         });
         node.stderr.on('data', (data) => {
             const msg = data.toString().trim();
@@ -737,13 +771,13 @@ const server = http.createServer((req, res) => {
                 if (msg.startsWith('SHOP_NAME:')) {
                     shopName = msg.replace('SHOP_NAME:', '');
                 } else {
-                    douyinLog('[错误] ' + msg);
+                    shopLog('[错误] ' + msg);
                 }
             }
         });
         node.on('close', (code) => {
             isDouyinRunning = false;
-            douyinLog('=== 登录拼多多店铺结束 ===');
+            shopLog('=== 登录拼多多店铺结束 ===');
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(code === 0 && shopName ? { success: true, shopName } : { success: false, message: '登录失败或超时' }));
         });
@@ -754,12 +788,12 @@ const server = http.createServer((req, res) => {
     if (req.url === '/run-pdd-analyzer' && req.method === 'POST') {
         // 智能检查：如果标志为true但进程不存在，重置标志
         if (isDouyinRunning) {
-            if (currentProcess) {
+            if (pddProcess) {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ success: false, message: '已有运行的进程' }));
                 return;
             } else {
-                douyinLog('[修复] 检测到标志未重置，强制重置 isDouyinRunning');
+                shopLog('[修复] 检测到标志未重置，强制重置 isDouyinRunning');
                 isDouyinRunning = false;
             }
         }
@@ -768,9 +802,9 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({ success: true, message: '已启动' }));
         // 防止卡死：如果10秒内进程还没启动，重置标志
         const pddSafetyTimer = setTimeout(() => {
-            if (isDouyinRunning && !currentProcess) {
+            if (isDouyinRunning && !pddProcess) {
                 isDouyinRunning = false;
-                douyinLog('[安全] 超时重置 isDouyinRunning (PDD)');
+                shopLog('[安全] 超时重置 isDouyinRunning (PDD)');
             }
         }, 10000);
         let body = '';
@@ -784,12 +818,12 @@ const server = http.createServer((req, res) => {
                 shippingFee = parseFloat(parsed.shippingFee) || 2.1;
                 insurance = parseFloat(parsed.insurance) || 4.01;
             } catch {}
-            douyinLog(`=== 开始获取拼多多商品 (目标${targetCount}个) [${shopName}] ===`);
+            shopLog(`=== 开始获取拼多多商品 (目标${targetCount}个) [${shopName}] ===`);
             const pddScript = path.join(WORKSPACE, 'pdd-shop-analyzer.js');
             if (!fs.existsSync(pddScript)) {
                 isDouyinRunning = false;
-                douyinLog('[错误] 拼多多脚本不存在: pdd-shop-analyzer.js');
-                douyinLog('=== 拼多多商品获取结束 ===');
+                shopLog('[错误] 拼多多脚本不存在: pdd-shop-analyzer.js');
+                shopLog('=== 拼多多商品获取结束 ===');
                 return;
             }
             // 将店铺名写入临时文件
@@ -798,12 +832,12 @@ const server = http.createServer((req, res) => {
             const feeConfigFile = path.join(WORKSPACE, 'fee_config.json');
             fs.writeFileSync(feeConfigFile, JSON.stringify({ shippingFee, insurance }));
             const node = spawn('node', [pddScript, targetCount.toString()], { shell: true, cwd: WORKSPACE });
-            currentProcess = node;
-            node.stdout.on('data', (data) => { const msg = data.toString().trim(); if (msg) douyinLog(msg); });
-            node.stderr.on('data', (data) => { const msg = data.toString().trim(); if (msg) douyinLog('[错误] ' + msg); });
+            pddProcess = node;
+            node.stdout.on('data', (data) => { const msg = data.toString().trim(); if (msg) shopLog(msg); });
+            node.stderr.on('data', (data) => { const msg = data.toString().trim(); if (msg) shopLog('[错误] ' + msg); });
             node.on('close', (code) => {
                 clearTimeout(pddSafetyTimer);
-                currentProcess = null;
+                pddProcess = null;
                 isDouyinRunning = false;
                 // 检测cookie过期标记文件，自动删除过期店铺
                 const markerFile = path.join(WORKSPACE, 'cookie_expired.txt');
@@ -812,12 +846,12 @@ const server = http.createServer((req, res) => {
                         const expiredShop = fs.readFileSync(markerFile, 'utf8').trim();
                         if (expiredShop) {
                             removeShop(expiredShop);
-                            douyinLog(`Cookie已过期，自动删除店铺: ${expiredShop}`);
+                            shopLog(`Cookie已过期，自动删除店铺: ${expiredShop}`);
                         }
                         fs.unlinkSync(markerFile);
                     }
                 } catch (e) {}
-                douyinLog('=== 拼多多商品获取结束 ===');
+                shopLog('=== 拼多多商品获取结束 ===');
             });
         });
         return;
@@ -833,13 +867,23 @@ const server = http.createServer((req, res) => {
         return;
     }
 
-    // 获取抖店/拼多多日志
+    // 获取抖店/拼多多日志（旧接口，保留兼容）
     if (req.url.startsWith('/get-douyin-logs') && req.method === 'GET') {
         const url = new URL(req.url, `http://${req.headers.host}`);
         const hours = parseInt(url.searchParams.get('hours')) || 24;
         const lines = parseInt(url.searchParams.get('lines')) || 1000;
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ logs: getLogsFromFile(DOUYIN_LOG_FILE, hours, lines) }));
+        return;
+    }
+
+    // 获取店铺商品分析日志（新接口，抖店+拼多多+自动化共用）
+    if (req.url.startsWith('/get-shop-logs') && req.method === 'GET') {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const hours = parseInt(url.searchParams.get('hours')) || 24;
+        const lines = parseInt(url.searchParams.get('lines')) || 1000;
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ logs: getLogsFromFile(SHOP_LOG_FILE, hours, lines) }));
         return;
     }
 

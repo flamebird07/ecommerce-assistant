@@ -8,6 +8,166 @@ const path = require('path');
 
 const COOKIES_DIR = path.join(__dirname, 'pdd-cookies');
 
+// ===== 调试开关 =====
+// 调试期间设为 true：脚本执行完后浏览器保持打开，便于人工检查最后的页面状态
+// 调试完成后改回 false
+const DEBUG = true;
+
+// 飞书API配置
+const FEISHU_CONFIG = {
+  app_id: 'cli_a91ad5ae63385bc9',
+  app_secret: 'ga7Gn6pBJgUkftKY2JEpFe3TJFpB2Mun',
+  app_token: 'CfAXbSrUFaBLv3stSRrcuUVon1b',
+  table_id: 'tbl7PuVUnnFJJeBM'  // 5号表格：网店商品列表
+};
+
+let _feishuToken = null;
+let _feishuTokenTime = 0;
+
+// 获取飞书Token
+async function getFeishuToken() {
+  const now = Date.now();
+  if (_feishuToken && (now - _feishuTokenTime) < 7000 * 1000) {
+    return _feishuToken;
+  }
+  const response = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ app_id: FEISHU_CONFIG.app_id, app_secret: FEISHU_CONFIG.app_secret })
+  });
+  const data = await response.json();
+  if (data.tenant_access_token) {
+    _feishuToken = data.tenant_access_token;
+    _feishuTokenTime = now;
+    return _feishuToken;
+  }
+  throw new Error('获取飞书Token失败');
+}
+
+// 上传图片到飞书
+async function uploadImageToFeishu(accessToken, imageUrl) {
+  try {
+    // 下载图片
+    const imageResponse = await fetch(imageUrl);
+    if (!imageResponse.ok) {
+      console.log(`下载图片失败: ${imageResponse.status}`);
+      return null;
+    }
+
+    // 检测图片类型
+    const buffer = await imageResponse.arrayBuffer();
+    const uint8Array = new Uint8Array(buffer);
+    let imageType = 'image/jpeg';
+
+    // Check for PNG signature
+    if (uint8Array[0] === 0x89 && uint8Array[1] === 0x50 && uint8Array[2] === 0x4E && uint8Array[3] === 0x47) {
+      imageType = 'image/png';
+    }
+
+    const extension = imageType === 'image/png' ? '.png' : '.jpg';
+    const fileName = `pdd_product_${Date.now()}${extension}`;
+
+    // 使用drive API上传到飞书云盘
+    const uploadUrl = 'https://open.feishu.cn/open-apis/drive/v1/files/upload_all';
+    const boundary = '----FormBoundary7MA4YWxkTrZu0gW';
+
+    const parts = [
+      `--${boundary}\r\nContent-Disposition: form-data; name="file_name"\r\n\r\n${fileName}`,
+      `--${boundary}\r\nContent-Disposition: form-data; name="parent_type"\r\n\r\nbitable_file`,
+      `--${boundary}\r\nContent-Disposition: form-data; name="parent_node"\r\n\r\n${FEISHU_CONFIG.app_token}`,
+      `--${boundary}\r\nContent-Disposition: form-data; name="size"\r\n\r\n${buffer.byteLength}`,
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: ${imageType}`
+    ];
+
+    const body = Buffer.concat([
+      Buffer.from(parts.join('\r\n') + '\r\n\r\n'),
+      Buffer.from(buffer),
+      Buffer.from(`\r\n--${boundary}--`)
+    ]);
+
+    const uploadResponse = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': `multipart/form-data; boundary=${boundary}`
+      },
+      body: body
+    });
+
+    const uploadResult = await uploadResponse.json();
+
+    if (uploadResult.code === 0) {
+      return uploadResult.data.file_token;
+    } else {
+      console.log(`上传图片失败: ${JSON.stringify(uploadResult)}`);
+      return null;
+    }
+  } catch (e) {
+    console.log(`上传图片异常: ${e.message}`);
+    return null;
+  }
+}
+
+// 写入单条商品到飞书表格
+async function writeProductToFeishu(accessToken, product, shopName) {
+  const baseUrl = `https://open.feishu.cn/open-apis/bitable/v1/apps/${FEISHU_CONFIG.app_token}/tables/${FEISHU_CONFIG.table_id}/records`;
+
+  const fields = {
+    '商品id': String(product.id),
+    '平台': '拼多多',
+    '店铺': shopName || '',
+    '记录时间': Date.now(),
+    '30天成交订单数': Number(product.salesCount) || 0
+  };
+
+  // 上传商品图片
+  if (product.imageUrl) {
+    console.log(`  上传图片: ${product.imageUrl.substring(0, 50)}...`);
+    const fileToken = await uploadImageToFeishu(accessToken, product.imageUrl);
+    if (fileToken) {
+      fields['商品图片'] = [{ file_token: fileToken }];
+      console.log(`  图片上传成功`);
+    } else {
+      console.log(`  图片上传失败`);
+    }
+  }
+
+  // 先检查是否已存在该商品
+  const listUrl = `${baseUrl}?page_size=100&filter=CurrentValue.[商品id]="${product.id}"`;
+  const listResponse = await fetch(listUrl, {
+    headers: { 'Authorization': `Bearer ${accessToken}` }
+  });
+  const listData = await listResponse.json();
+
+  if (listData.data && listData.data.items && listData.data.items.length > 0) {
+    // 更新现有记录
+    const recordId = listData.data.items[0].record_id;
+    const updateUrl = `${baseUrl}/${recordId}`;
+    const updateResponse = await fetch(updateUrl, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ fields })
+    });
+    const updateData = await updateResponse.json();
+    return updateData.code === 0;
+  } else {
+    // 创建新记录
+    const createResponse = await fetch(baseUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ fields })
+    });
+    const createData = await createResponse.json();
+    return createData.code === 0;
+  }
+}
+
 async function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -58,7 +218,13 @@ async function clickSalesSort(page) {
           // 策略1：找表头内的排序图标（SVG、箭头、排序相关 class）
           const sortIcons = th.querySelectorAll('svg, [class*="sort"], [class*="arrow"], [class*="icon"], i, em');
           if (sortIcons.length > 0) {
-            sortIcons[sortIcons.length - 1].click();
+            const lastIcon = sortIcons[sortIcons.length - 1];
+            // 兼容SVG等没有click方法的元素
+            if (typeof lastIcon.click === 'function') {
+              lastIcon.click();
+            } else {
+              lastIcon.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            }
             return { method: 'icon', count: sortIcons.length };
           }
 
@@ -89,21 +255,8 @@ async function clickSalesSort(page) {
       console.log(`[主页面] 成交件数排序结果(第${attempt}次): ${JSON.stringify(sortResult)}`);
 
       if (sortResult.method !== 'not_found' && sortResult.method !== 'error' && sortResult.method !== 'none') {
+        // 只点一次排序（拼多多默认点一次=降序），不要多点
         await sleep(2000);
-        // 再次点击确保降序
-        await mainFrame.evaluate(() => {
-          const ths = [...document.querySelectorAll('table thead th')];
-          for (const th of ths) {
-            if (!(th.innerText || '').includes('成交件数')) continue;
-            const rect = th.getBoundingClientRect();
-            const clickX = rect.left + rect.width * 0.8;
-            const clickY = rect.top + rect.height / 2;
-            const target = document.elementFromPoint(clickX, clickY);
-            if (target) { target.click(); return true; }
-          }
-          return false;
-        }).catch(() => {});
-        console.log('[主页面] 再次点击成交件数排序(确保降序)');
         return; // 成功则退出
       }
 
@@ -122,8 +275,9 @@ async function clickSalesSort(page) {
   console.log('未成功点击"成交件数"排序');
 }
 
-// 取消勾选指定列的 checkbox
-// 拼多多表头每个 th 里有 checkbox 控制列显示/隐藏
+// 取消勾选指定列的 checkbox（控制列显示/隐藏）
+// 拼多多表头每个 th 里有 checkbox，勾选=显示该列，取消勾选=隐藏该列
+// 用 playwright 真实点击（page.locator + click），而非 el.click()，兼容 React
 async function uncheckColumns(page, columnNames) {
   const frames = collectFrames(page);
   for (const frame of frames) {
@@ -132,51 +286,80 @@ async function uncheckColumns(page, columnNames) {
     } catch (e) { continue; }
     const scope = frame === page.mainFrame() ? '主页面' : 'iframe';
 
-    const result = await frame.evaluate((names) => {
-      const unchecked = [];
-      const ths = [...document.querySelectorAll('table thead th')];
-      if (ths.length === 0) return { unchecked, thCount: 0, reason: 'no_th' };
+    for (const colName of columnNames) {
+      try {
+        // 在该 frame 内定位目标表头 th
+        // 用 frame.locator（playwright 真实点击，触发 React 事件）
+        const thLocator = frame.locator('table thead th', { hasText: colName }).first();
+        if (!(await thLocator.count())) {
+          console.log(`[${scope}] 未找到含"${colName}"的表头`);
+          continue;
+        }
 
-      for (const th of ths) {
-        const text = (th.innerText || '').trim();
-        for (const name of names) {
-          if (text.includes(name) && !unchecked.includes(name)) {
-            // PDD 用自定义 DIV checkbox，class 含 CBX/textWrapper/prevCheckSquare
-            // 按可靠性顺序尝试多种选择器
-            const selectors = [
-              'input[type="checkbox"]',     // 标准 checkbox
-              '[class*="CBX"]',             // PDD 自定义 checkbox 容器
-              '[class*="textWrapper"]',     // PDD 文字包装器（带勾选功能）
-              '[class*="prevCheckSquare"]', // PDD 勾选方块
-              '[class*="checkbox"]',        // 通用 checkbox class
-              '[role="checkbox"]'           // ARIA 角色
-            ];
-            let clicked = false;
-            for (const sel of selectors) {
-              const cb = th.querySelector(sel);
-              if (cb) {
-                const rect = cb.getBoundingClientRect();
-                if (rect.width > 0) {
-                  cb.click();
-                  unchecked.push(name + '(' + sel + ')');
-                  clicked = true;
-                  break;
-                }
-              }
+        // 在该 th 内找 checkbox 元素（兼容标准 input 和自定义 DIV checkbox）
+        // 优先级：标准 input > PDD 自定义 class > role=checkbox
+        const cbSelectors = [
+          'input[type="checkbox"]',
+          '[class*="prevCheckSquare"]',
+          '[class*="CBX"]',
+          '[class*="checkbox"]',
+          '[role="checkbox"]'
+        ];
+        let cbLocator = null;
+        for (const sel of cbSelectors) {
+          const cand = thLocator.locator(sel).first();
+          if (await cand.count()) {
+            // 检查是否可见
+            if (await cand.isVisible().catch(() => false)) {
+              cbLocator = cand;
+              break;
             }
-            if (!clicked) {
-              // 最后兜底：点击 th 本身（PDD 表头整列可点击切换）
-              th.click();
-              unchecked.push(name + '(th点击)');
-            }
-            break;
           }
         }
-      }
-      return { unchecked, thCount: ths.length };
-    }, columnNames).catch(() => ({ unchecked: [], thCount: 0, reason: 'error' }));
 
-    console.log(`[${scope}] 取消勾选结果: th总数=${result.thCount}, 结果=${JSON.stringify(result.unchecked)}`);
+        if (!cbLocator) {
+          // 诊断：dump 出目标表头的内部 HTML，看真实 checkbox 结构
+          const thHtml = await thLocator.evaluate((el) => (el.innerHTML || '').substring(0, 300)).catch(() => '(无法读取)');
+          console.log(`[${scope}] "${colName}"表头内未找到可点击的 checkbox`);
+          console.log(`[${scope}] "${colName}"表头内部HTML片段: ${thHtml}`);
+          continue;
+        }
+
+        // 判断当前勾选状态：PDD 的勾选框通常有 checked 选中 class
+        // 用 aria-checked 或 class 含 checked/selected 判断
+        const stateInfo = await cbLocator.evaluate((el) => {
+          const aria = el.getAttribute('aria-checked');
+          const cls = el.className || '';
+          const clsStr = typeof cls === 'string' ? cls : '';
+          // 向上找父级判断（自定义 checkbox 状态常在父容器）
+          const parent = el.closest('[class*="check"], [class*="CBX"], [role="checkbox"]') || el;
+          const parentCls = typeof parent.className === 'string' ? parent.className : '';
+          const isChecked =
+            aria === 'true' ||
+            /checked|selected|active/i.test(clsStr) ||
+            /checked|selected|active/i.test(parentCls);
+          return { isChecked, aria, cls: clsStr.substring(0, 60), parentCls: parentCls.substring(0, 60) };
+        }).catch(() => ({ isChecked: null }));
+
+        // 已取消勾选的，跳过
+        if (stateInfo.isChecked === false) {
+          console.log(`[${scope}] "${colName}"已是未勾选(隐藏)状态，跳过`);
+          continue;
+        }
+
+        // 真实点击（playwright 会做命中测试，比 el.click() 可靠）
+        await cbLocator.click({ timeout: 5000, force: false }).catch(async (e) => {
+          // force=false 失败时再用 force 重试一次
+          await cbLocator.click({ timeout: 5000, force: true }).catch(() => {});
+        });
+        console.log(`[${scope}] 已点击"${colName}"表头 checkbox (点击前状态: ${JSON.stringify(stateInfo)})`);
+        await sleep(800);
+      } catch (e) {
+        console.log(`[${scope}] 取消"${colName}"勾选异常: ${e.message}`);
+      }
+    }
+
+    console.log(`[${scope}] 取消勾选流程结束，共处理 ${columnNames.length} 列`);
     return; // 只处理第一个有表头的 frame
   }
 }
@@ -210,67 +393,100 @@ async function extractPddProducts(page, maxCount) {
 
       const headerTexts = headerCells.map(h => (h.innerText || '').trim());
 
-      // 按列名找到表头 th 的水平中心X
-      function headerCenterX(keyword) {
-        for (const h of headerCells) {
-          if ((h.innerText || '').trim().includes(keyword)) {
-            const r = h.getBoundingClientRect();
-            return r.left + r.width / 2;
-          }
-        }
-        return null;
+      // 用列索引定位：找"成交件数"是第几列，每行直接按索引取td，不靠坐标猜
+      let salesColIndex = -1;
+      for (let i = 0; i < headerTexts.length; i++) {
+        if (headerTexts[i].includes('成交件数')) { salesColIndex = i; break; }
       }
 
-      const salesHeaderX = headerCenterX('成交件数');
-
-      // 给定行的一个 td，算它离表头目标列中心的水平距离
-      function distToHeaderX(td, targetX) {
-        const r = td.getBoundingClientRect();
-        return Math.abs((r.left + r.width / 2) - targetX);
-      }
-
-      // 从行的 td 列表中找离目标表头列最近的那个 td
-      function findCellForHeader(tds, targetX) {
-        let best = null, bestDist = Infinity;
-        for (const td of tds) {
-          const r = td.getBoundingClientRect();
-          if (r.width <= 0) continue;
-          const d = distToHeaderX(td, targetX);
-          if (d < bestDist) { bestDist = d; best = td; }
-        }
-        return best;
-      }
+      // 调试：记录每行的原始信息（无论是否成功提取），便于排查为何某些行抓不到
+      const rowDebug = [];
 
       for (const row of rows) {
         if (out.length >= limit) break;
         const rowText = (row.innerText || '').trim();
         if (!rowText || rowText.length < 5) continue;
 
-        // 收集行的数据 cell（td，排除 measure-row 占位行和窄cell如勾选框）
-        const tds = [...row.querySelectorAll('td')].filter(c => {
+        // 收集行的全部 td（不过滤，保留所有列以支持索引对齐）
+        const allTds = [...row.querySelectorAll('td')];
+        // 过滤后的 td 列表（排除窄cell，用于图片等查找）
+        const tds = allTds.filter(c => {
           const r = c.getBoundingClientRect();
-          // 宽度>60 排除勾选框/序号等窄cell，这些cell的centerX会错误匹配到"成交件数"
           return r.width > 60 && r.height > 0;
         });
         if (tds.length === 0) continue;
 
-        // ---- 成交件数：找离"成交件数"表头列最近的 td ----
+        // ---- 成交件数：按列索引直接取 td ----
         // PDD数值单元格格式是"较前30日245"——"较前30日"是环比说明，最后一个数字才是真实值
         let salesCount = 0;
-        if (salesHeaderX !== null) {
-          const salesTd = findCellForHeader(tds, salesHeaderX);
-          if (salesTd) {
-            const text = (salesTd.innerText || '').replace(/,/g, '');
-            // 取所有数字，取最后一个（跳过"较前30日"里的30）
-            const nums = text.match(/\d+/g);
-            if (nums && nums.length > 0) salesCount = parseInt(nums[nums.length - 1]);
+        if (salesColIndex >= 0 && salesColIndex < allTds.length) {
+          const salesTd = allTds[salesColIndex];
+          const text = (salesTd.innerText || '').replace(/,/g, '');
+          // 取所有数字，取最后一个（跳过"较前30日"里的30）
+          const nums = text.match(/\d+/g);
+          if (nums && nums.length > 0) salesCount = parseInt(nums[nums.length - 1]);
+        }
+
+        // ---- 商品ID：多策略提取 ----
+        // 策略1：从行内 a 标签的 href / data-* 属性提取（最可靠）
+        // 策略2：从行内任意元素的 data-goods-id / data-id 等属性提取
+        // 策略3：从行文本提取 "ID:xxx" 或纯数字（兼容旧逻辑）
+        let productId = '';
+        let idSource = '';
+
+        // 策略1&2：DOM 属性
+        const idAttrs = ['data-goods-id', 'data-goodsid', 'data-id', 'data-product-id', 'goodsid', 'goods-id'];
+        const allEls = [...row.querySelectorAll('a, [data-goods-id], [data-goodsid], [data-id], [data-product-id]')];
+        for (const el of allEls) {
+          // 检查 href
+          const href = el.getAttribute('href') || '';
+          let hrefId = '';
+          const hrefPatterns = [
+            /goods_id=(\d+)/i,
+            /goodsId=(\d+)/i,
+            /goods\/(\d+)/i,
+            /product[_-]?id=(\d+)/i,
+            /\/(\d{6,20})(?:[/?#]|$)/
+          ];
+          for (const pat of hrefPatterns) {
+            const hm = href.match(pat);
+            if (hm) { hrefId = hm[1]; break; }
+          }
+          if (hrefId) { productId = hrefId; idSource = 'href'; break; }
+          // 检查 data 属性
+          for (const attr of idAttrs) {
+            const v = el.getAttribute(attr);
+            if (v && /^\d{6,20}$/.test(v)) { productId = v; idSource = attr; break; }
+          }
+          if (productId) break;
+        }
+
+        // 策略3：行文本兜底
+        if (!productId) {
+          const m = rowText.match(/ID[\s:：]*(\d{6,20})/) || rowText.match(/货号[\s:：]*([A-Za-z0-9]{4,20})/);
+          if (m) { productId = m[1]; idSource = 'text-ID'; }
+        }
+        if (!productId) {
+          // 最后兜底：行内最长的纯数字串（>=6位）
+          const nums = rowText.match(/\d{6,20}/g);
+          if (nums && nums.length > 0) {
+            nums.sort((a, b) => b.length - a.length);
+            productId = nums[0];
+            idSource = 'text-longest-num';
           }
         }
 
-        // ---- 商品ID：从行文本提取 ----
-        let productId = '';
-        const m = rowText.match(/ID[\s:：]*(\d{10,20})/) || rowText.match(/\b(\d{10,20})\b/);
-        if (m) productId = m[1];
+        // 记录该行调试信息
+        if (rowDebug.length < 12) {
+          rowDebug.push({
+            textHead: rowText.substring(0, 40).replace(/\n/g, ' '),
+            salesCount,
+            productId,
+            idSource,
+            linkCount: row.querySelectorAll('a[href]').length,
+            sampleHrefs: [...row.querySelectorAll('a[href]')].slice(0, 2).map(a => (a.getAttribute('href') || '').substring(0, 60))
+          });
+        }
 
         // ---- 商品图片：行内第一张有效图 ----
         let imageUrl = '';
@@ -296,23 +512,8 @@ async function extractPddProducts(page, maxCount) {
           headerCount: headerCells.length,
           cellCount: rows.length > 0 ? rows[0].querySelectorAll('td').length : 0,
           headerTexts,
-          salesHeaderX: salesHeaderX ? Math.round(salesHeaderX) : null,
-          // 调试：第一行每个td到"成交件数"表头的距离（含宽度，用于核对过滤）
-          firstRowDebug: (function () {
-            const first = rows[0];
-            if (!first || salesHeaderX === null) return [];
-            const allTds = [...first.querySelectorAll('td')].filter(c => {
-              const r = c.getBoundingClientRect();
-              return r.width > 0 && r.height > 0;
-            });
-            return allTds.map(td => {
-              const r = td.getBoundingClientRect();
-              const cx = Math.round(r.left + r.width / 2);
-              const dist = Math.abs(cx - Math.round(salesHeaderX));
-              const used = r.width > 60 ? 'Y' : 'N';
-              return { text: (td.innerText || '').trim().substring(0, 15), w: Math.round(r.width), cx, distToSales: dist, used };
-            });
-          })()
+          salesColIndex,
+          rowDebug
         }
       };
     }, maxCount).catch((e) => {
@@ -322,11 +523,14 @@ async function extractPddProducts(page, maxCount) {
 
     console.log(`[${scope}] 行数=${data.meta.rowCount || 0} 表头列数=${data.meta.headerCount || 0} 行cell数=${data.meta.cellCount || 0}`);
     console.log(`[${scope}] 表头=${JSON.stringify(data.meta.headerTexts || [])}`);
-    console.log(`[${scope}] 成交件数表头X=${data.meta.salesHeaderX || '?'}`);
-    if (data.meta.firstRowDebug && data.meta.firstRowDebug.length > 0) {
-      console.log(`[${scope}] 第一行所有td(Y=用于匹配, N=被过滤):`);
-      for (const td of data.meta.firstRowDebug) {
-        console.log(`  [${td.used}] w=${td.w} cx=${td.cx} dist=${td.distToSales} "${td.text}"`);
+    console.log(`[${scope}] 成交件数列索引=${data.meta.salesColIndex ?? '?'}`);
+    if (data.meta.rowDebug && data.meta.rowDebug.length > 0) {
+      console.log(`[${scope}] 每行提取过程(rowDebug):`);
+      for (const rd of data.meta.rowDebug) {
+        console.log(`  id=${rd.productId || '(空)'} src=${rd.idSource} sales=${rd.salesCount} links=${rd.linkCount} text="${rd.textHead}"`);
+        if (rd.sampleHrefs && rd.sampleHrefs.length > 0) {
+          console.log(`    href样例: ${rd.sampleHrefs.join(' | ')}`);
+        }
       }
     }
 
@@ -581,26 +785,53 @@ async function main() {
       console.log('点击30日失败:', e.message);
     }
 
-    // 取消勾选"商品访客数"和"商品浏览量"列（缩小表格宽度，减少干扰列）
-    console.log('取消勾选"商品访客数"和"商品浏览量"...');
-    await uncheckColumns(page, ['商品访客数', '商品浏览量']);
-    await sleep(2000);
-
     // 点击成交件数排序（降序）
     // 拼多多后台内容可能在主页面，也可能在 iframe 内，需要遍历所有 frame
     console.log('点击成交件数排序...');
     await clickSalesSort(page);
     await sleep(3000);
 
-    // 截图保存当前页面状态
-    await page.screenshot({ path: path.join(__dirname, 'pdd-product-data.png'), fullPage: true });
-    console.log('已截图: pdd-product-data.png');
+    // 取消勾选"商品访客数"、"商品浏览量"列（隐藏这些不关心的列）
+    console.log('取消勾选不关心的列(商品访客数、商品浏览量)...');
+    await uncheckColumns(page, ['商品访客数', '商品浏览量']);
+    await sleep(2000);
+
+    // 截图保存当前页面状态（容错：截图失败不阻塞主流程）
+    try {
+      await page.screenshot({ path: path.join(__dirname, 'pdd-product-data.png'), fullPage: true, timeout: 10000 });
+      console.log('已截图: pdd-product-data.png');
+    } catch (e) {
+      console.log('全页截图失败，改用普通截图:', e.message);
+      try {
+        await page.screenshot({ path: path.join(__dirname, 'pdd-product-data.png'), timeout: 10000 });
+        console.log('已截图(非全页): pdd-product-data.png');
+      } catch (e2) {
+        console.log('截图全部失败，跳过截图，继续提取数据');
+      }
+    }
 
     // 提取商品数据（遍历主页面 + 所有 iframe，支持翻页）
     console.log('提取商品数据...');
     let allProducts = [];
     let pageNum = 1;
     let maxPages = 50; // 安全上限，防止死循环
+    let writeCount = 0; // 成功写入飞书的数量
+
+    // 获取飞书Token
+    let feishuToken = null;
+    try {
+      feishuToken = await getFeishuToken();
+      console.log('飞书Token获取成功');
+    } catch (e) {
+      console.log('飞书Token获取失败:', e.message);
+    }
+
+    // 读取店铺名
+    let shopName = '';
+    const shopNameFile = path.join(__dirname, 'current_shop.txt');
+    if (fs.existsSync(shopNameFile)) {
+      shopName = fs.readFileSync(shopNameFile, 'utf-8').trim();
+    }
 
     while (allProducts.length < targetCount && pageNum <= maxPages) {
       console.log(`\n--- 第 ${pageNum} 页 (已收集 ${allProducts.length}/${targetCount}) ---`);
@@ -615,12 +846,29 @@ async function main() {
       }
 
       if (products.length > 0) {
-        // 去重合并
+        // 去重合并并实时写入飞书
         const seenIds = new Set(allProducts.map(p => p.id));
         for (const p of products) {
           if (!seenIds.has(p.id) && allProducts.length < targetCount) {
             seenIds.add(p.id);
             allProducts.push(p);
+
+            // 实时写入飞书表格
+            if (feishuToken) {
+              try {
+                console.log(`>> 写入飞书: ${p.id} (成交${p.salesCount}件)...`);
+                const success = await writeProductToFeishu(feishuToken, p, shopName);
+                if (success) {
+                  console.log(`>> 写入成功`);
+                  writeCount++;
+                } else {
+                  console.log(`>> 写入失败`);
+                }
+                await sleep(500); // 避免请求过快
+              } catch (e) {
+                console.log(`>> 写入出错: ${e.message}`);
+              }
+            }
           }
         }
         console.log(`第${pageNum}页提取 ${products.length} 个商品，累计 ${allProducts.length} 个`);
@@ -649,6 +897,7 @@ async function main() {
       const imgFlag = p.imageUrl ? '有图' : '无图';
       console.log(`  ${i+1}. ID: ${p.id}, 成交件数: ${p.salesCount}, ${imgFlag}`);
     });
+    console.log(`\n成功写入飞书: ${writeCount} 个商品`);
 
     // 保存结果到文件
     const resultFile = path.join(__dirname, 'pdd_products.json');
@@ -657,9 +906,14 @@ async function main() {
 
   } catch (e) {
     console.error('执行出错:', e.message);
-    process.exit(1);
+    if (!DEBUG) process.exit(1);
   } finally {
-    await browser.close();
+    if (DEBUG) {
+      console.log('\n[DEBUG] 调试模式已开启，浏览器保持打开，按 Ctrl+C 退出脚本。');
+      await new Promise(() => {});
+    } else {
+      await browser.close();
+    }
   }
 }
 

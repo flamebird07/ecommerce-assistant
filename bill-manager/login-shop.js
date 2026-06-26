@@ -77,19 +77,52 @@ async function main() {
 
     // 获取店铺名称
     console.log('获取店铺名称...');
-    let shopName = await page.evaluate(() => {
-      // 方法1: 查找右上角店铺名称元素 (top < 250, left > 1200)
+    // 先截图并打印右上角所有元素，用于调试
+    await page.screenshot({ path: 'debug-shop-name.png', timeout: 10000 });
+    const candidates = await page.evaluate(() => {
       const allElements = document.querySelectorAll('*');
+      const results = [];
       for (const el of allElements) {
         const text = el.innerText?.trim();
         const rect = el.getBoundingClientRect();
-        // 店铺名称特征: 在页面右侧上部，字体较大，文字较短
+        // 收集右上角区域的所有文本元素
         if (text && text.length >= 2 && text.length <= 20 &&
             rect.left > 1200 && rect.top > 100 && rect.top < 250 &&
-            rect.width > 50 && rect.height > 20 && rect.height < 60 &&
-            !text.includes('退出') && !text.includes('登录') &&
-            !text.includes('消息') && !text.includes('首页')) {
-          return text.split('\n')[0].trim();
+            rect.width > 0 && rect.height > 0) {
+          results.push({
+            text: text.split('\n')[0].trim(),
+            left: Math.round(rect.left),
+            top: Math.round(rect.top),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+            tag: el.tagName
+          });
+        }
+      }
+      return results;
+    });
+    console.log('右上角候选元素:', JSON.stringify(candidates, null, 2));
+
+    let shopName = await page.evaluate(() => {
+      const allElements = document.querySelectorAll('*');
+      const excludeKeywords = ['退出', '登录', '消息', '首页', '近7天', '近30天', '近90天',
+        '筛选', '导出', '下载', '刷新', '搜索', '设置', '帮助', '反馈',
+        '天', '日', '周', '月', '年', '排序', '筛选条件',
+        '大促', '活动', '优惠', '促销', '折扣', '满减', '券',
+        '待发货', '待付款', '已完成', '已取消', '退款',
+        '订单', '商品', '客服', '财务', '店铺', '营销',
+        '直播', '短视频', '达人', '联盟', '数据中心'];
+
+      for (const el of allElements) {
+        const text = el.innerText?.trim();
+        const rect = el.getBoundingClientRect();
+        if (text && text.length >= 2 && text.length <= 20 &&
+            rect.left > 1200 && rect.top > 100 && rect.top < 250 &&
+            rect.width > 50 && rect.height > 20 && rect.height < 60) {
+          const shouldExclude = excludeKeywords.some(kw => text.includes(kw));
+          if (!shouldExclude) {
+            return text.split('\n')[0].trim();
+          }
         }
       }
       return '';

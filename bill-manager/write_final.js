@@ -174,8 +174,9 @@ function parseShopName(ocrText) {
     let firstContentLine = '';
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
-        const stripped = line.trim().replace(/^```[a-zA-Z]*\n?/g, '');
-        if (stripped === '客户联' || stripped === '存根联' || stripped === '客户版') continue;
+        // 去掉Markdown代码块前缀和标题前缀
+        const stripped = line.trim().replace(/^```[a-zA-Z]*\n?/g, '').replace(/^#+\s*/, '');
+        if (stripped === '客户联' || stripped === '存根联' || stripped === '客户版' || stripped === '客户取') continue;
         if (stripped === '销售明细' || stripped === '销售/退货明细') continue;
         if (stripped === '销售单' || stripped === '退货单' || stripped === '销售退货单') continue;
         // 跳过状态标记词
@@ -198,6 +199,8 @@ function parseShopName(ocrText) {
 
     // 第一步：去掉括号
     name = name.replace(/[（()）【】\[\]]+/g, '');
+    // 去掉"客户取"等无关后缀
+    name = name.replace(/客户取/g, '').trim();
     // 第二步：去掉店名内部的分隔符（点号、斜杠、中横线等连接符）
     name = name.replace(/\s*[./·\-\u2013\u2014\u0300\u0301\u0304\u0306]+\s*/g, '');
     // 先去掉Markdown OCR常见后缀（必须在去掉销售单之前）

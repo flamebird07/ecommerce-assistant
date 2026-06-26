@@ -619,6 +619,7 @@ async function writeToFeishu(accessToken, products, shopName) {
       '30天成交订单数': Number(product.orderCount),
       '近30天退款率': product.listReturnRate ? product.listReturnRate / 100 : 0,
       '修正退款率': product.returnRate ? product.returnRate / 100 : null,
+      '修正退货率参考销量': (product.refundOrderCount !== null && product.refundOrderCount !== undefined) ? Number(product.refundOrderCount) : null,
       '商品编码': product.merchantCode || '',
       '最新售价': product.merchantIncome || 0
     };
@@ -1178,9 +1179,10 @@ async function getRefundRateFromDetailPage(context, page, productId) {
     console.log('填充日期失败:', e.message);
   }
 
-  // 提取退货率和退款人数
+  // 提取退货率、退款人数和退款订单数
   let refundRate = null;
   let refundCount = null;
+  let refundOrderCount = null;
   try {
     if (detailPage.isClosed()) {
       console.log('详情页已关闭');
@@ -1230,7 +1232,17 @@ async function getRefundRateFromDetailPage(context, page, productId) {
       }
     }
 
-    console.log(`提取到退货率: ${refundRate}%, 退款人数: ${refundCount}`);
+    // 提取退款订单数（"退款率"下方"退款订单数"后面的数字，作为修正退货率参考销量）
+    const orderCountIdx = pageText.indexOf('退款订单数');
+    if (orderCountIdx !== -1) {
+      const orderCountChunk = pageText.substring(orderCountIdx, orderCountIdx + 50);
+      const orderCountMatch = orderCountChunk.match(/退款订单数\s*([\d,]+)/);
+      if (orderCountMatch) {
+        refundOrderCount = parseInt(orderCountMatch[1].replace(/,/g, ''));
+      }
+    }
+
+    console.log(`提取到退货率: ${refundRate}%, 退款人数: ${refundCount}, 退款订单数: ${refundOrderCount}`);
     console.log(`详情页URL: ${detailPage.url()}`);
 
     // 退款人数少于3人，数据不准确，跳过修正退货率（保持为空）
@@ -1251,7 +1263,7 @@ async function getRefundRateFromDetailPage(context, page, productId) {
     console.log('关闭详情页失败:', e.message);
   }
 
-  return refundRate;
+  return { rate: refundRate, refundOrderCount };
 }
 
 // 从商品管理页面获取商品图片URL
@@ -1417,12 +1429,12 @@ async function extractProductsOnPage(page) {
         if (headerText.includes('商品ID') || headerText === 'ID') {
           ID_COL = i;
         }
-        // 匹配成交订单数列
-        if (headerText.includes('成交') || headerText.includes('订单数')) {
+        // 匹配成交件数列（优先匹配"成交件数"，而不是"成交订单数"）
+        if (headerText === '成交件数' || headerText.includes('成交件数')) {
           ORDER_COL = i;
         }
-        // 匹配退款率列
-        if (headerText.includes('退款率') || headerText.includes('退货率')) {
+        // 匹配退款率列（精确匹配"退款率(支付时间)"）
+        if (headerText.includes('退款率') && headerText.includes('支付时间')) {
           RATE_COL = i;
         }
       }
@@ -1498,6 +1510,16 @@ async function extractProductsOnPage(page) {
               }
             }
           }
+        }
+
+        // 调试：打印所有单元格内容
+        if (idx === 0) {
+          console.log(`[调试] 第一行所有单元格:`);
+          for (let i = 0; i < cells.length; i++) {
+            const cellText = (cells[i]?.innerText || '').trim().substring(0, 30);
+            console.log(`  cells[${i}]: "${cellText}"`);
+          }
+          console.log(`[调试] RATE_COL=${RATE_COL}, 提取到退款率=${returnRate}%`);
         }
 
         results.push({
@@ -1839,7 +1861,7 @@ async function processProductRound(page, context, targetCount, accessToken, shop
   // 增加页面稳定时间
   console.log('等待页面完全稳定...');
   await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
-  await sleep(5000);
+  await sleep(8000);
 
   // 尝试点击"近30天"按钮，使用多种策略
   let clicked = false;
@@ -1864,16 +1886,38 @@ async function processProductRound(page, context, targetCount, accessToken, shop
     } catch (e2) {
       console.log('策略2也失败:', e2.message);
       try {
-        // 策略3: 尝试点击下拉框或菜单项
-        console.log('尝试点击"近30天"按钮（策略3）...');
-        const thirtyDayBtn3 = page.locator('text=近30天').nth(1);
-        await thirtyDayBtn3.waitFor({ timeout: 20000 });
-        await thirtyDayBtn3.click({ timeout: 20000 });
+        // 策略3: 尝试点击日期选择器下拉框
+        console.log('尝试点击日期选择器（策略3）...');
+        // 先尝试点击包含日期的下拉框
+        const dateDropdown = page.locator('[class*="date"], [class*="picker"], [class*="select"]').filter({ hasText: /天|日/ }).first();
+        await dateDropdown.waitFor({ timeout: 10000 });
+        await dateDropdown.click();
+        await sleep(2000);
+        // 然后尝试点击"近30天"
+        const thirtyDayInDropdown = page.locator('text=近30天').first();
+        await thirtyDayInDropdown.waitFor({ timeout: 10000 });
+        await thirtyDayInDropdown.click();
         clicked = true;
         console.log('策略3成功点击了"近30天"按钮');
       } catch (e3) {
         console.log('策略3也失败:', e3.message);
-        console.log('点击"近30天"失败，将尝试直接提取数据...');
+        try {
+          // 策略4: 尝试点击包含"7天"的元素，看是否能展开选项
+          console.log('尝试点击"7天"按钮展开选项（策略4）...');
+          const sevenDayBtn = page.locator('text=7天').first();
+          await sevenDayBtn.waitFor({ timeout: 10000 });
+          await sevenDayBtn.click();
+          await sleep(2000);
+          // 然后尝试点击"近30天"
+          const thirtyDayAfterClick = page.locator('text=近30天').first();
+          await thirtyDayAfterClick.waitFor({ timeout: 10000 });
+          await thirtyDayAfterClick.click();
+          clicked = true;
+          console.log('策略4成功点击了"近30天"按钮');
+        } catch (e4) {
+          console.log('策略4也失败:', e4.message);
+          throw new Error('点击"近30天"按钮失败，停止执行以避免获取错误的7天数据');
+        }
       }
     }
   }
@@ -1883,15 +1927,76 @@ async function processProductRound(page, context, targetCount, accessToken, shop
     console.log('等待数据加载...');
     await sleep(60000); // 增加等待时间到60秒
   } else {
-    // 如果点击失败，等待一段时间再尝试提取
-    console.log('等待页面稳定后尝试提取数据...');
-    await sleep(30000);
+    // 如果点击失败，抛出错误而不是继续执行
+    throw new Error('点击"近30天"按钮失败，停止执行以避免获取错误的7天数据');
   }
 
   try {
     await page.screenshot({ path: 'step4-data.png', timeout: 10000 });
   } catch (e) {
     console.log('截图跳过:', e.message);
+  }
+
+  // 取消勾选"商品访客数"和"商品浏览量"（第一项和第二项）
+  console.log('尝试取消勾选不需要的指标...');
+  try {
+    // 先截图看看当前页面状态
+    await page.screenshot({ path: 'debug-before-uncheck.png', timeout: 10000 });
+
+    const uncheckResult = await page.evaluate(() => {
+      const results = [];
+
+      // 方法1: 查找所有包含"商品访客数"或"商品浏览量"文字的元素
+      const allElements = document.querySelectorAll('*');
+      for (const el of allElements) {
+        const text = (el.innerText || '').trim();
+        // 只处理精确匹配或开头匹配的元素，避免误匹配父容器
+        if (text === '商品访客数' || text === '商品浏览量' ||
+            text.startsWith('商品访客数') || text.startsWith('商品浏览量')) {
+          // 查找该元素或其父元素中的checkbox/勾选状态
+          const checkbox = el.querySelector('input[type="checkbox"], [role="checkbox"]') ||
+                          el.closest('label, [class*="checkbox"]')?.querySelector('input[type="checkbox"]');
+          if (checkbox) {
+            if (checkbox.checked) {
+              checkbox.click();
+              results.push(`checkbox取消: ${text.substring(0, 15)}`);
+            }
+          } else if (el.classList && (el.classList.contains('active') || el.classList.contains('selected') || el.classList.contains('checked'))) {
+            el.click();
+            results.push(`class取消: ${text.substring(0, 15)}`);
+          }
+        }
+      }
+
+      // 方法2: 查找li元素（常见于下拉菜单）
+      const liElements = document.querySelectorAll('li, [role="option"], [role="menuitem"]');
+      for (const li of liElements) {
+        const text = (li.innerText || '').trim();
+        if (text === '商品访客数' || text === '商品浏览量') {
+          // 检查是否被选中
+          const checkbox = li.querySelector('input[type="checkbox"], [role="checkbox"]');
+          const isChecked = checkbox ? checkbox.checked :
+                           li.classList.contains('active') || li.classList.contains('selected') ||
+                           li.getAttribute('aria-selected') === 'true';
+          if (isChecked) {
+            li.click();
+            results.push(`li取消: ${text}`);
+          }
+        }
+      }
+
+      return results;
+    });
+
+    if (uncheckResult.length > 0) {
+      console.log('取消勾选结果:', uncheckResult.join(', '));
+      await sleep(3000); // 等待页面更新
+      await page.screenshot({ path: 'debug-after-uncheck.png', timeout: 10000 });
+    } else {
+      console.log('未找到需要取消的勾选项，可能需要手动查看截图调整选择器');
+    }
+  } catch (e) {
+    console.log('取消勾选失败，继续执行:', e.message);
   }
 
   // Step 5: 提取商品数据并处理（支持翻页）
@@ -2055,7 +2160,8 @@ async function processProductRound(page, context, targetCount, accessToken, shop
       console.log(`  开始处理，当前writeCount=${writeCount}`);
 
       // 获取详情页退货率
-      const realReturnRate = await getRefundRateFromDetailPage(context, page, product.id);
+      const detailResult = await getRefundRateFromDetailPage(context, page, product.id);
+      const realReturnRate = detailResult ? detailResult.rate : null;
 
       if (realReturnRate) {
         product.returnRate = realReturnRate;
@@ -2064,6 +2170,14 @@ async function processProductRound(page, context, targetCount, accessToken, shop
         // 修正退货率获取失败或退款人数不足，留空
         product.returnRate = null;
         console.log('>> 修正退货率为空');
+      }
+
+      // 退款订单数作为修正退货率参考销量
+      if (detailResult && detailResult.refundOrderCount !== null && detailResult.refundOrderCount !== undefined) {
+        product.refundOrderCount = detailResult.refundOrderCount;
+        console.log(`>> 修正退货率参考销量(退款订单数): ${detailResult.refundOrderCount}`);
+      } else {
+        product.refundOrderCount = null;
       }
 
       // 使用共享的订单页面获取商家编码、最新售价、商品图片
@@ -2505,7 +2619,11 @@ async function main() {
     await page.goto(CONFIG.douyin.loginUrl, { waitUntil: 'domcontentloaded', timeout: 120000 });
     process.stdout.write('页面加载完成，等待5秒稳定...\n');
     await sleep(5000);
-    await page.screenshot({ path: 'step1-homepage.png' });
+    try {
+      await page.screenshot({ path: 'step1-homepage.png', timeout: 10000 });
+    } catch (e) {
+      console.log('截图失败，继续执行:', e.message);
+    }
 
     const isLoggedIn = await page.evaluate(() => {
       return window.location.href.includes('fxg.jinritemai.com/ffa/mshop/homepage');
@@ -2541,19 +2659,34 @@ async function main() {
 
     // 等待页面稳定
     await sleep(5000);
-    await page.screenshot({ path: 'step1-after-login.png' });
+    try {
+      await page.screenshot({ path: 'step1-after-login.png', timeout: 10000 });
+    } catch (e) {
+      console.log('截图失败，继续执行:', e.message);
+    }
 
     // Step 2: 进入电商罗盘
     process.stdout.write('\nStep 2: 进入电商罗盘...\n');
     process.stdout.write('正在加载页面...\n');
-    await page.goto('https://compass.jinritemai.com/shop', { waitUntil: 'domcontentloaded', timeout: 60000 });
-    process.stdout.write('页面加载完成，等待30秒稳定...\n');
-    await sleep(30000);
-    process.stdout.write('当前URL: ' + page.url() + '\n');
+    try {
+      await page.goto('https://compass.jinritemai.com/shop', { waitUntil: 'domcontentloaded', timeout: 60000 });
+      process.stdout.write('页面加载完成，等待30秒稳定...\n');
+      await sleep(30000);
+      process.stdout.write('当前URL: ' + page.url() + '\n');
+    } catch (e) {
+      process.stdout.write('页面加载失败或超时: ' + e.message + '\n');
+      process.stdout.write('当前URL: ' + page.url() + '\n');
+      // 继续执行，不退出
+    }
 
-    // 获取店铺名称（页面右上角）
+    // 获取店铺名称（页面右上角），添加重试逻辑
     console.log('\n获取店铺名称...');
-    let shopName = await page.evaluate(() => {
+    let shopName = '';
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        // 等待页面稳定
+        await sleep(2000);
+        shopName = await page.evaluate(() => {
       // 找右上角包含"瑾"的元素 (left > 1500, top < 200)
       const allElements = document.querySelectorAll('*');
       for (const el of allElements) {
@@ -2566,23 +2699,36 @@ async function main() {
       }
       return '';
     });
+        if (shopName) break; // 成功获取到店铺名称，跳出重试循环
+      } catch (e) {
+        console.log(`获取店铺名称失败 (尝试 ${attempt + 1}/3): ${e.message}`);
+        if (attempt < 2) {
+          console.log('等待页面稳定后重试...');
+          await sleep(5000);
+        }
+      }
+    }
     if (!shopName) {
       // 如果获取失败，尝试从首页获取
       console.log('从首页重新获取店铺名称...');
-      await page.goto('https://fxg.jinritemai.com/ffa/mshop/homepage/index', { waitUntil: 'domcontentloaded', timeout: 60000 });
-      await sleep(8000);
-      shopName = await page.evaluate(() => {
-        const allElements = document.querySelectorAll('*');
-        for (const el of allElements) {
-          const text = el.innerText?.trim();
-          const rect = el.getBoundingClientRect();
-          if (text && text.includes('瑾') && text.length > 2 && text.length < 15 &&
-              rect.left > 1500 && rect.top > 150 && rect.top < 200) {
-            return text.split('\n')[0].trim();
+      try {
+        await page.goto('https://fxg.jinritemai.com/ffa/mshop/homepage/index', { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await sleep(8000);
+        shopName = await page.evaluate(() => {
+          const allElements = document.querySelectorAll('*');
+          for (const el of allElements) {
+            const text = el.innerText?.trim();
+            const rect = el.getBoundingClientRect();
+            if (text && text.includes('瑾') && text.length > 2 && text.length < 15 &&
+                rect.left > 1500 && rect.top > 150 && rect.top < 200) {
+              return text.split('\n')[0].trim();
+            }
           }
-        }
-        return '';
-      });
+          return '';
+        });
+      } catch (e) {
+        console.log('从首页获取店铺名称失败:', e.message);
+      }
     }
     if (!shopName && shopNameArg) {
       shopName = shopNameArg;

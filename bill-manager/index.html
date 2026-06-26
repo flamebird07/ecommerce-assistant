@@ -634,7 +634,8 @@
 
         // 获取当前活动tab对应的日志端点
         function getLogsEndpoint() {
-            return (activeLogTab === 'douyin' || activeLogTab === 'auto') ? '/get-douyin-logs' : '/get-logs';
+            if (activeLogTab === 'bill') return '/get-logs';
+            return '/get-shop-logs'; // douyin 和 auto 都读商品分析日志
         }
 
         // 已显示的日志ID集合（用时间+内容前50字符做唯一标识）
@@ -687,16 +688,31 @@
                 try {
                     const sr = await fetchWithTimeout('/get-process-status');
                     const sd = await sr.json();
-                    if (!sd.running) {
-                        if (isBillRunning) { isBillRunning = false; setBillButtons(false); pendingBillDone = true; }
-                        if (isDouyinRunning) { isDouyinRunning = false; setDouyinButtons(false); pendingDouyinDone = true; }
+                    // 分别检查票据和商品分析的状态
+                    if (isBillRunning && !sd.billRunning) {
+                        isBillRunning = false;
+                        setBillButtons(false);
+                        pendingBillDone = true;
+                    }
+                    const shopActive = sd.shopRunning ?? sd.douyinRunning;
+                    if (isDouyinRunning && !shopActive) {
+                        isDouyinRunning = false;
+                        setDouyinButtons(false);
+                        pendingDouyinDone = true;
                     }
                     // 两个任务都结束后，延迟停止轮询并检查关机
                     // 重要：自动化运行期间（autoRunning=true）不能在此触发关机，
                     // 因为店铺之间的间隔等待期进程会短暂结束，但自动化还没完成。
                     // 自动化完成后的关机由 startAutoProcess 自身负责（1197行）。
                     if (!isBillRunning && !isDouyinRunning && (pendingBillDone || pendingDouyinDone)) {
-                        setTimeout(() => {
+                        // 延迟5秒后再检查一次，确保进程真正结束
+                        setTimeout(async () => {
+                            try {
+                                const sr2 = await fetchWithTimeout('/get-process-status');
+                                const sd2 = await sr2.json();
+                                // 如果服务端进程还在运行，不停止轮询
+                                if (sd2.running) return;
+                            } catch {}
                             if (!isBillRunning && !isDouyinRunning && !autoRunning) {
                                 stopStatusPolling();
                                 // 检查自动关机选项（无论是哪个页面勾选的）
@@ -705,7 +721,7 @@
                                     fetchWithTimeout('/schedule-shutdown', { method: 'POST' }).catch(() => {});
                                 }
                             }
-                        }, 3000);
+                        }, 5000);
                         pendingBillDone = false;
                         pendingDouyinDone = false;
                     }
@@ -789,25 +805,24 @@
         }
 
         async function stopProcess() {
-            log('正在停止...', 'warning');
+            log('正在停止票据...', 'warning');
             try {
-                const res = await fetchWithTimeout('/stop-process', { method: 'POST' });
+                const res = await fetchWithTimeout('/stop-bill', { method: 'POST' });
                 const r = await res.json();
-                log(r.success ? '已停止进程' : '停止失败: ' + r.message, r.success ? 'success' : 'error');
+                log(r.success ? '已停止票据进程' : '停止失败: ' + r.message, r.success ? 'success' : 'error');
             } catch (e) { log('停止请求失败: ' + e.message, 'error'); }
             isBillRunning = false; setBillButtons(false);
-            isDouyinRunning = false; setDouyinButtons(false);
-            pendingBillDone = false; pendingDouyinDone = false;
-            stopStatusPolling();
+            pendingBillDone = false;
+            if (!isDouyinRunning) stopStatusPolling();
         }
 
         async function stopDouyinProcess() {
             if (!isDouyinRunning) return;
-            log('正在停止抓取...', 'warning');
+            log('正在停止商品分析...', 'warning');
             try {
-                const res = await fetchWithTimeout('/stop-process', { method: 'POST' });
+                const res = await fetchWithTimeout('/stop-shop', { method: 'POST' });
                 const r = await res.json();
-                log(r.success ? '已停止进程' : '停止失败: ' + r.message, r.success ? 'success' : 'error');
+                log(r.success ? '已停止商品分析进程' : '停止失败: ' + r.message, r.success ? 'success' : 'error');
             } catch (e) { log('停止请求失败: ' + e.message, 'error'); }
             isDouyinRunning = false; setDouyinButtons(false);
             pendingDouyinDone = false;
@@ -1070,7 +1085,7 @@
 
                     // 检查cookie过期
                     try {
-                        const logRes = await fetchWithTimeout('/get-douyin-logs');
+                        const logRes = await fetchWithTimeout('/get-shop-logs');
                         const logData = await logRes.json();
                         const recentLogs = (logData.logs || []).slice(-20).join(' ');
                         if (recentLogs.includes('COOKIE_EXPIRED:' + selectedShop)) {
@@ -1233,7 +1248,7 @@
                         }
                         if (waitCount >= maxWaitCount) {
                             log(`[自动化] ${c.shopName}: 等待进程结束超时(${maxWaitSec}秒)，强制停止`, 'warning');
-                            fetchWithTimeout('/stop-process', { method: 'POST' }).catch(() => {});
+                            fetchWithTimeout('/stop-shop', { method: 'POST' }).catch(() => {});
                         }
                     }
 
@@ -1250,7 +1265,7 @@
                         // 成功完成，重置失败计数
                         shopFailCounts.set(idx, 0);
                         try {
-                            const logRes = await fetchWithTimeout('/get-douyin-logs');
+                            const logRes = await fetchWithTimeout('/get-shop-logs');
                             const logData = await logRes.json();
                                     const recentLogs = (logData.logs || []).slice(-30).join(' '); // 增加到30条
 
@@ -1330,8 +1345,8 @@
             log('正在停止自动化...', 'warning');
             autoRunning = false;
 
-            // 停止正在运行的进程
-            fetchWithTimeout('/stop-process', { method: 'POST' }).catch(() => {});
+            // 停止正在运行的商品分析进程（不影响票据）
+            fetchWithTimeout('/stop-shop', { method: 'POST' }).catch(() => {});
 
             // 如果设置了自动关机，取消关机（与触发关机的条件保持一致：两个勾选框任一勾选）
             if (document.getElementById('autoShutdownAfterAll')?.checked || document.getElementById('autoShutdown')?.checked) {
@@ -1472,7 +1487,7 @@
         // 页面加载后自动显示最近日志
         async function loadRecentLogs() {
             try {
-                const lr = await fetchWithTimeout('/get-douyin-logs?lines=200');
+                const lr = await fetchWithTimeout('/get-shop-logs?lines=200');
                 const ld = await lr.json();
                 const el = document.getElementById('log-douyin');
                 if (el && ld.logs && ld.logs.length > 0) {
