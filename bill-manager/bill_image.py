@@ -191,7 +191,6 @@ def process_image(img_path, record_time, seq_no, total=1, current=1):
     batch = parse_batch(text)
     shop = parse_shop_name(text)
     parsed = parse_date(text)
-    parsed = parse_date(text)
     # 支持带时分秒或不带时分秒的日期
     bill_time_ms = None
     if parsed:

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 抖店电商罗盘数据采集脚本
  * 功能：登录抖店 -> 采集商品数据 -> 获取成交订单数 -> 进入详情页获取真实退货率 -> 写入飞书表格
  * 支持Cookie持久化，避免重复扫码
@@ -16,13 +16,17 @@ let INSURANCE = 4.01;
 
 // 计算建议毛利（达到3%利润目标）
 // 推导：令平均单利润 >= 售价×3%，求最小毛利
-// 毛利 × (0.994×(1-退款率) - 0.03) >= 成本×0.03 + 成本×0.006×(1-退款率) + 固定成本
-function calcMinGross(cost, returnRate) {
-    const rd = returnRate / 100;
+// 新公式：成功单数用总退款率，退货单数用发货后退货率
+// avgProfit = (gross - commission - fixedCost) * (1 - R_total) - fixedCost * R_post
+// 解出 gross >= {cost * [0.03 + 0.006*(1-R_total)] + fixedCost * [1-R_total+R_post]} / [(1-R_total)*0.994 - 0.03]
+function calcMinGross(cost, totalRefundRate, postShipRefundRate, targetPercent = 3) {
+    const R_total = totalRefundRate / 100;
+    const R_post = postShipRefundRate / 100;
     const fixedCost = SHIPPING_FEE + INSURANCE;
-    const num = cost * 0.03 + cost * 0.006 * (1 - rd) + fixedCost;
-    const den = 0.994 * (1 - rd) - 0.03;
-    if (den <= 0) return Infinity; // 退款率太高，无法达到3%利润
+    const target = targetPercent / 100;
+    const num = cost * target + cost * 0.006 * (1 - R_total) + fixedCost * (1 - R_total + R_post);
+    const den = 0.994 * (1 - R_total) - target;
+    if (den <= 0) return Infinity; // 退款率太高，无法达到目标利润
     return num / den;
 }
 
@@ -297,7 +301,7 @@ async function checkRecentRecord(accessToken, productId) {
           const pureProfit5 = record.fields['纯利5%'];
 
           if (recordId && String(recordId) === String(productId)) {
-            console.log(`[checkRecentRecord] 找到匹配的记录! 商品id=${recordId}, 记录时间=${recordTime}, 修正退款率=${correctedRate}, 订单数=${orderCount}, 纯利5%=${pureProfit5}`);
+            console.log(`[checkRecentRecord] 找到匹配的记录! 商品id=${recordId}, 记录时间=${recordTime}, 修正发后退货率=${correctedRate}, 订单数=${orderCount}, 纯利5%=${pureProfit5}`);
             // 检查记录时间
             let recordTimeMs = 0;
             if (typeof recordTime === 'number') {
@@ -611,6 +615,7 @@ async function writeToFeishu(accessToken, products, shopName) {
     const productIdStr = String(product.id);
 
     // 构建字段数据
+    console.log('[DEBUG-FEISHU] product.postShipRate=' + product.postShipRate + ', product.returnRate=' + product.returnRate + ', product.postShippingRate=' + product.postShippingRate);
     const fields = {
       '商品id': productIdStr,
       '平台': '抖店',
@@ -618,10 +623,15 @@ async function writeToFeishu(accessToken, products, shopName) {
       '记录时间': Date.now(),
       '30天成交订单数': Number(product.orderCount),
       '近30天退款率': product.listReturnRate ? product.listReturnRate / 100 : 0,
-      '修正退款率': product.returnRate ? product.returnRate / 100 : null,
+      '修正退款率': product.totalRefundRate ? product.totalRefundRate / 100 : null,
+      '修正发后退货率': product.postShipRefundRate ? Number(product.postShipRefundRate) / 100 : null,
+      '退货占发货占比': (product.totalRefundRate && product.postShipRefundRate) ? Number((Number(product.postShipRefundRate) / 100) / (1 - (product.totalRefundRate - Number(product.postShipRefundRate)) / 100).toFixed(4)) : null,
       '修正退货率参考销量': (product.refundOrderCount !== null && product.refundOrderCount !== undefined) ? Number(product.refundOrderCount) : null,
       '商品编码': product.merchantCode || '',
-      '最新售价': product.merchantIncome || 0
+      '最新售价': product.merchantIncome || 0,
+      '发货后退款率': product.postShipRate ? product.postShipRate / 100 : (product.returnRate ? product.returnRate / 100 : null),
+      '月广告消耗': product.adSpend ? Math.max(0, Number(String(product.adSpend).replace(/[¥,]/g, ''))) : null,
+      '平均每单广告费': (product.adSpend && product.orderCount) ? Number((Math.max(0, Number(String(product.adSpend).replace(/[¥,]/g, ''))) / product.orderCount).toFixed(2)) : null
     };
 
     // 纯利3% = 最新售价 × 3%
@@ -645,8 +655,8 @@ async function writeToFeishu(accessToken, products, shopName) {
 
     // 100%退货率：亏损 = 邮费+运费险（不需要成本）
     const orderNumForLoss = product.orderCount || 0;
-    const listRateForLoss = product.listReturnRate || 0;
-    const correctedRateForLoss = product.returnRate || 0;
+    const listRateForLoss = product.postShipRate || 0;
+    const correctedRateForLoss = product.postShippingRate || 0;
     const maxRateForLoss = Math.max(listRateForLoss, correctedRateForLoss);
     if (orderNumForLoss > 0 && maxRateForLoss >= 100) {
       const lossPerOrder = -(SHIPPING_FEE + INSURANCE);
@@ -663,17 +673,20 @@ async function writeToFeishu(accessToken, products, shopName) {
 
       // 计算平均每单利润（用连续值，不用Math.round）
       const orderNum = product.orderCount || 0;
-      const listRate = product.listReturnRate || 0;
-      const correctedRate = product.returnRate || 0;
+      const totalRefundRate = product.totalRefundRate || product.listReturnRate || 0;
+      const successRateDecimal = totalRefundRate / 100;
+      const postShipRate = product.postShipRefundRate || product.postShipRate || 0;
+      const refundRateDecimal = postShipRate / 100;
+      // 保留旧变量供后续干预建议逻辑使用
+      const listRate = product.postShipRate || 0;
+      const correctedRate = product.postShippingRate || 0;
       const maxRate = Math.max(listRate, correctedRate);
       let avgProfitPerOrder = 0;
       if (orderNum > 0) {
         const price = product.merchantIncome;
         const cost = product.cost;
-        const returnRateDecimal = maxRate / 100;
-        // 不用Math.round，用连续值计算，避免向上取整导致利润高估
-        const successOrders = orderNum * (1 - returnRateDecimal);
-        const refundOrders = orderNum * returnRateDecimal;
+        const successOrders = orderNum * (1 - successRateDecimal);
+        const refundOrders = orderNum * refundRateDecimal;
         const commission = price * 0.006;
         // 成功订单利润
         const profitPerSuccess = price - cost - commission - SHIPPING_FEE - INSURANCE;
@@ -682,8 +695,11 @@ async function writeToFeishu(accessToken, products, shopName) {
         // 总利润
         const totalProfit = (profitPerSuccess * successOrders) - (costPerRefund * refundOrders);
         avgProfitPerOrder = totalProfit / orderNum;
+        // 减去平均每单广告费
+        const adCostPerOrder = product.adSpend ? Math.max(0, Number(String(product.adSpend).replace(/[¥,]/g, ''))) / orderNum : 0;
+        avgProfitPerOrder = avgProfitPerOrder - adCostPerOrder;
         fields['平均每单利润'] = Number(avgProfitPerOrder.toFixed(2));
-        console.log(`  平均每单利润: ${fields['平均每单利润']}元 (订单${orderNum}单, 退货率${maxRate}%, 成功${successOrders.toFixed(1)}单, 退货${refundOrders.toFixed(1)}单)`);
+        console.log(`  平均每单利润: ${fields['平均每单利润']}元 (订单${orderNum}单, 总退货率${totalRefundRate}%, 发货退货率${postShipRate}%, 成功${successOrders.toFixed(1)}单, 退货${refundOrders.toFixed(1)}单)`);
       }
 
       // 获取现有干预内容，用于跳过已有人工标记的建议
@@ -691,29 +707,7 @@ async function writeToFeishu(accessToken, products, shopName) {
       const existingIntervention = recordIdForInter ? recordIntervention.get(recordIdForInter) : null;
       const interventionStr = existingIntervention ? String(existingIntervention) : '';
 
-      // 高退货率强制毛利至少80元：订单>10 且 近30天退款率>70% 且 修正退款率>75%
-      // 但如果平均每单利润已高于纯利3%，说明当前毛利已足够，不需要建议
-      const pureProfit3High = (product.merchantIncome || 0) * 0.03;
-      if (orderNum > 10 && listRate > 0.70 && correctedRate > 0.75 && avgProfitPerOrder <= pureProfit3High) {
-        if (product.cost !== undefined && product.cost !== null && product.merchantIncome) {
-          const currentGross = product.merchantIncome - product.cost;
-          // 按正常公式计算建议毛利
-          const rd = maxRate / 100;
-          const minGross = calcMinGross(product.cost, maxRate);
-          const sg = Math.max(Math.ceil(minGross), 80); // 至少80元
-          if (sg > currentGross) {
-            fields['等待人工操作'] = `建议毛利${sg}元`;
-            console.log(`  高退货率建议毛利: 订单${orderNum}, 退货率${maxRate}%, 需毛利${sg}, 当前毛利${currentGross.toFixed(0)}元`);
-          }
-        }
-        // 没有成本或计算不出时，兜底80元
-        if (!fields['等待人工操作']) {
-          fields['等待人工操作'] = '建议毛利80元';
-          console.log(`  高退货率兜底毛利80元: 订单${orderNum}, 近30天退款率${listRate}%, 修正退款率${correctedRate}%`);
-        }
-      } else if (orderNum > 10 && listRate > 0.70 && correctedRate > 0.75) {
-        console.log(`  跳过高退货率建议: 平均每单利润${avgProfitPerOrder.toFixed(2)} > 纯利3%${pureProfit3High.toFixed(2)}，当前毛利已足够`);
-      } else {
+      // 辅助函数：判断是否应跳过干预建议（已有相同建议则跳过）
       function shouldSkipIntervention(suggestionText) {
         if (!interventionStr) return false;
         // 已有建议毛利则跳过新的建议毛利（不管金额是否相同）
@@ -727,17 +721,47 @@ async function writeToFeishu(accessToken, products, shopName) {
         return interventionStr.includes(suggestionText);
       }
 
+      // 高退货率强制毛利至少80元：订单>10 且 发后退款率>70% 且 修正发后退货率>75%
+      // 但如果平均每单利润已高于纯利3%，说明当前毛利已足够，不需要建议
+      const pureProfit3High = (product.merchantIncome || 0) * 0.03;
+      if (orderNum > 10 && listRate > 70 && correctedRate > 75 && avgProfitPerOrder <= pureProfit3High) {
+        if (product.cost !== undefined && product.cost !== null && product.merchantIncome) {
+          const currentGross = product.merchantIncome - product.cost;
+          // 按正常公式计算建议毛利
+          const rd = maxRate / 100;
+          const minGross = calcMinGross(product.cost, totalRefundRate, postShipRate);
+          const sg = Math.max(Math.ceil(minGross), 80); // 至少80元
+          if (sg > currentGross) {
+            fields['等待人工操作'] = `建议毛利${sg}元`;
+            console.log(`  高退货率建议毛利: 订单${orderNum}, 退货率${maxRate}%, 需毛利${sg}, 当前毛利${currentGross.toFixed(0)}元`);
+          }
+        }
+        // 没有成本或计算不出时，兜底80元
+        if (!fields['等待人工操作']) {
+          fields['等待人工操作'] = '建议毛利80元';
+          console.log(`  高退货率兜底毛利80元: 订单${orderNum}, 发后退款率${listRate}%, 修正发后退货率${correctedRate}%`);
+        }
+      } else if (orderNum > 10 && listRate > 70 && correctedRate > 75) {
+        // 利润达标时写入备注
+        if (product.cost !== undefined && product.cost !== null && product.merchantIncome) {
+          const minGross = calcMinGross(product.cost, totalRefundRate, postShipRate);
+          const sg = Math.ceil(minGross);
+          const sg5 = Math.ceil(calcMinGross(product.cost, totalRefundRate, postShipRate, 5));
+          remarkParts.push(`毛利标准${sg}元(利润达标)；不建议超过${sg5}元`);
+          console.log(`  毛利标准${sg}元(利润达标)；不建议超过${sg5}元: 平均每单利润${avgProfitPerOrder.toFixed(2)} > 纯利3%${pureProfit3High.toFixed(2)}`);
+        }
+      }
       // 判断是否需要建议毛利增长或下架
       let suggestionText = '';
       let suggestedGrossText = '';
       if (interventionStr.includes('已下架')) {
         console.log(`  不建议下架：已经干预包含已下架`);
-      } else if (orderNum >= 5 && maxRate > 0.90) {
+      } else if (orderNum >= 5 && maxRate > 90) {
         // 销量>=5且退货率>90%，建议下架
         suggestionText = '建议下架';
         // 同时计算建议毛利
         if (product.cost !== undefined && product.cost !== null && product.merchantIncome) {
-          const minGross = calcMinGross(product.cost, maxRate);
+          const minGross = calcMinGross(product.cost, totalRefundRate, postShipRate);
           const currentGross = product.merchantIncome - product.cost;
           if (minGross > currentGross) {
             const sg = Math.ceil(minGross);
@@ -745,12 +769,12 @@ async function writeToFeishu(accessToken, products, shopName) {
             console.log(`  动态涨价建议: 成本${product.cost}, 退货率${maxRate}%, 需毛利${sg}, 当前毛利${currentGross.toFixed(0)}`);
           }
         }
-      } else if (orderNum >= 5 && maxRate >= 1.0) {
+      } else if (orderNum >= 5 && maxRate >= 100) {
         // 销量>=5且退货率=100%，建议下架
         suggestionText = '建议下架';
         // 同时计算建议毛利
         if (product.cost !== undefined && product.cost !== null && product.merchantIncome) {
-          const minGross = calcMinGross(product.cost, maxRate);
+          const minGross = calcMinGross(product.cost, totalRefundRate, postShipRate);
           const currentGross = product.merchantIncome - product.cost;
           if (minGross > currentGross) {
             const sg = Math.ceil(minGross);
@@ -763,17 +787,28 @@ async function writeToFeishu(accessToken, products, shopName) {
         // 但如果平均每单利润已高于纯利3%，说明当前毛利已足够，不需要建议
         const pureProfit3 = product.merchantIncome * 0.03;
         if (avgProfitPerOrder > pureProfit3) {
-          console.log(`  跳过建议毛利: 平均每单利润${avgProfitPerOrder.toFixed(2)} > 纯利3%${pureProfit3.toFixed(2)}，当前毛利已足够`);
+          // 利润达标时写入备注
+          const minGross = calcMinGross(product.cost, totalRefundRate, postShipRate);
+          const sg = Math.ceil(minGross);
+          const sg5 = Math.ceil(calcMinGross(product.cost, totalRefundRate, postShipRate, 5));
+          remarkParts.push(`毛利标准${sg}元(利润达标)；不建议超过${sg5}元`);
+          console.log(`  毛利标准${sg}元(利润达标)；不建议超过${sg5}元: 平均每单利润${avgProfitPerOrder.toFixed(2)} > 纯利3%${pureProfit3.toFixed(2)}`);
         } else {
-          const minGross = calcMinGross(product.cost, maxRate);
+          const minGross = calcMinGross(product.cost, totalRefundRate, postShipRate);
           const currentGross = product.merchantIncome - product.cost;
           if (minGross > currentGross) {
             const sg = Math.ceil(minGross);
             suggestionText = `建议毛利${sg}元`;
             console.log(`  动态涨价建议: 成本${product.cost}, 退货率${maxRate}%, 需毛利${sg}, 当前毛利${currentGross.toFixed(0)}`);
           }
+          // 始终写入毛利标准到备注
+          if (!remarkParts.some(r => r.includes('毛利标准'))) {
+            const sg = Math.ceil(minGross);
+            const sg5 = Math.ceil(calcMinGross(product.cost, totalRefundRate, postShipRate, 5));
+            remarkParts.push(`毛利标准${sg}元；不建议超过${sg5}元`);
+            console.log(`  [新逻辑] 写入毛利标准: ${sg}元, 不建议超过${sg5}元`);
+          }
         }
-      }
 
       if (suggestionText) {
         if (shouldSkipIntervention(suggestionText)) {
@@ -787,6 +822,13 @@ async function writeToFeishu(accessToken, products, shopName) {
           }
           console.log(`  等待人工操作: ${fields['等待人工操作']} (订单数${orderNum}, 退货率${maxRate}%)`);
         }
+      } else {
+        // 没有新建议时，清除旧的等待人工操作（保留手动干预）
+        const existingOp = existingIntervention ? String(existingIntervention) : '';
+        if (existingOp && !existingOp.includes('已下架') && !existingOp.includes('手动')) {
+          fields['等待人工操作'] = '';
+          console.log(`  清除旧等待人工操作: "${existingOp}"`);
+        }
       }
 
       // 原有毛利低于40的逻辑（只在没有更高优先级建议时生效）
@@ -799,7 +841,14 @@ async function writeToFeishu(accessToken, products, shopName) {
         }
       }
 
-      // 判断是否写入"推荐复制到其它店铺"
+      // 广告费过高警告
+      const avgAdCost = product.adSpend ? Math.max(0, Number(String(product.adSpend).replace(/[¥,]/g, ''))) / orderNum : 0;
+      if (!fields['等待人工操作'] && orderNum > 10 && avgAdCost > 1) {
+        fields['等待人工操作'] = '广告费过高';
+        console.log();
+      }
+
+      /* [DISABLED] 判断是否写入"推荐复制到其它店铺"
       const skipRecommend = existingIntervention && (String(existingIntervention).includes('过季了') || String(existingIntervention).includes('已经复制到其它店铺'));
       if (skipRecommend) {
         console.log(`  不写入推荐复制：已经干预包含(${existingIntervention})`);
@@ -810,12 +859,12 @@ async function writeToFeishu(accessToken, products, shopName) {
       if (!skipRecommend && orderNum >= 3 && orderNum <= 5 && bothNot100) {
         // 订单数3-5且两个退款率都不是100%
         recommendText = '推荐复制到其它店铺';
-        console.log(`  等待人工操作追加: 推荐复制到其它店铺 (订单数${orderNum}, 列表退款率${listRate}%, 修正退款率${correctedRate}%)`);
-      } else if (!skipRecommend && orderNum >= 6 && orderNum <= 10 && maxRate < 0.85) {
+        console.log(`  等待人工操作追加: 推荐复制到其它店铺 (订单数${orderNum}, 发后退款率${listRate}%, 修正发后退货率${correctedRate}%)`);
+      } else if (!skipRecommend && orderNum >= 6 && orderNum <= 10 && maxRate < 85) {
         // 订单数6-10且最大退款率低于85%
         recommendText = '推荐复制到其它店铺';
         console.log(`  等待人工操作追加: 推荐复制到其它店铺 (订单数${orderNum}, 最大退款率${maxRate}%)`);
-      } else if (!skipRecommend && orderNum > 10 && maxRate < 0.70) {
+      } else if (!skipRecommend && orderNum > 10 && maxRate < 70) {
         // 订单数>10且最大退款率低于70%
         recommendText = '推荐复制到其它店铺';
         console.log(`  等待人工操作追加: 推荐复制到其它店铺 (订单数${orderNum}, 最大退款率${maxRate}%)`);
@@ -828,17 +877,34 @@ async function writeToFeishu(accessToken, products, shopName) {
         } else {
           fields['等待人工操作'] = recommendText;
         }
-      }
+        // 推荐复制时写入毛利标准
+        if (product.cost !== undefined && product.cost !== null && product.merchantIncome && !remarkParts.some(r => r.includes('毛利标准'))) {
+          const minGross = calcMinGross(product.cost, totalRefundRate, postShipRate);
+          const sg = Math.ceil(minGross);
+          const sg5 = Math.ceil(calcMinGross(product.cost, totalRefundRate, postShipRate, 5));
+          remarkParts.push(`毛利标准${sg}元；不建议超过${sg5}元`);
+        }
+      } [END DISABLED] */
 
       // 订单数>15且满足"推荐复制到其它店铺"条件时，追加"建议裂变此商品"（不受skipRecommend影响）
-      if (orderNum > 15 && maxRate < 0.70) {
-        const append = '建议裂变此商品';
-        if (fields['等待人工操作']) {
-          fields['等待人工操作'] = fields['等待人工操作'] + '；' + append;
-        } else {
-          fields['等待人工操作'] = append;
+      if (orderNum > 15) {
+        const shipRefundRatio = totalRefundRate > correctedRate ? (correctedRate / (100 - (totalRefundRate - correctedRate))) * 100 : correctedRate;
+        if (shipRefundRatio < 70) {
+          const append = '建议裂变此商品';
+          if (fields['等待人工操作']) {
+            fields['等待人工操作'] = fields['等待人工操作'] + '；' + append;
+          } else {
+            fields['等待人工操作'] = append;
+          }
+          console.log(`  等待人工操作追加: 建议裂变此商品 (订单数${orderNum} > 15, 退货占发货${shipRefundRatio.toFixed(1)}% < 70%)`);
+          // 裂变时写入毛利标准
+          if (product.cost !== undefined && product.cost !== null && product.merchantIncome && !remarkParts.some(r => r.includes('毛利标准'))) {
+            const minGross = calcMinGross(product.cost, totalRefundRate, postShipRate);
+            const sg = Math.ceil(minGross);
+            const sg5 = Math.ceil(calcMinGross(product.cost, totalRefundRate, postShipRate, 5));
+            remarkParts.push(`毛利标准${sg}元；不建议超过${sg5}元`);
+          }
         }
-        console.log(`  等待人工操作追加: 建议裂变此商品 (订单数${orderNum} > 15, 退货率${maxRate}% < 70%)`);
       }
 
       /*
@@ -869,10 +935,10 @@ async function writeToFeishu(accessToken, products, shopName) {
       console.log(`  备注追加: 成本获取失败`);
     }
 
-    // 如果近30天退款率 > 修正退款率 超过5%，添加备注
-    if (product.listReturnRate !== undefined && product.returnRate !== undefined &&
-        product.listReturnRate !== null && product.returnRate !== null) {
-      const diff = product.listReturnRate - product.returnRate;
+    // 如果发后退款率 > 修正发后退货率 超过5%，添加备注
+    if (product.postShipRate !== undefined && product.returnRate !== undefined &&
+        product.postShipRate !== null && product.returnRate !== null) {
+      const diff = product.postShipRate - product.returnRate;
       if (diff > 5) {
         remarkParts.push(`注意退货率正在增长${today}`);
         console.log(`  备注追加: 注意退货率正在增长${today} (差值: ${diff.toFixed(2)}%)`);
@@ -1053,8 +1119,8 @@ async function waitForQRCodeLogin(page) {
 }
 
 // 打开详情页获取真实退货率
-async function getRefundRateFromDetailPage(context, page, productId) {
-  console.log(`\n获取商品 ${productId} 的详情页退货率...`);
+async function getDetailPageData(context, page, productId) {
+  console.log(`\n获取商品 ${productId} 的详情页数据...`);
 
   // 点击"查看详情"按钮
   const clicked = await page.evaluate((pid) => {
@@ -1179,10 +1245,14 @@ async function getRefundRateFromDetailPage(context, page, productId) {
     console.log('填充日期失败:', e.message);
   }
 
-  // 提取退货率、退款人数和退款订单数
+  // 提取所有数据：退货率、退款人数、退款订单数、发货后退款率、月广告消耗
   let refundRate = null;
+  let preShipRefundRate = null;
+  let postShipRefundRate = null;
   let refundCount = null;
   let refundOrderCount = null;
+  let postShippingRate = null;
+  let adSpend = null;
   try {
     if (detailPage.isClosed()) {
       console.log('详情页已关闭');
@@ -1190,35 +1260,85 @@ async function getRefundRateFromDetailPage(context, page, productId) {
     }
     const pageText = await detailPage.evaluate(() => document.body.innerText);
 
-    // 先找"退款率"后面的百分比
-    const idx = pageText.indexOf('退款率');
-    if (idx !== -1) {
-      const chunk = pageText.substring(idx, idx + 200);
-      const rateMatch = chunk.match(/(\d+\.?\d*)%/);
-      if (rateMatch) {
-        refundRate = rateMatch[1];
+    // 修正发后退货率提取：从页面文本中定位各卡片的退款率
+    // 页面可能有两种布局：
+    // 1. 交错布局：卡片标题+数据依次出现（全部...发货前退款...未收货退款...已收货退款）
+    // 2. 标签标题在前：所有卡片标题集中在顶部，数据在下方
+
+    // 辅助函数：从文本中提取退款率（跳过同行基准值）
+    function extractRefundRateFromText(text) {
+      const rateIdx = text.indexOf('退款率');
+      if (rateIdx === -1) return null;
+      const afterRate = text.substring(rateIdx);
+      const lines = afterRate.split('\n').filter(l => l.trim());
+
+      // 1. 先看同一行是否有百分比
+      const sameLine = lines[0] || '';
+      const sameLineMatch = sameLine.match(/(\d+\.?\d*)%/);
+      if (sameLineMatch) {
+        const val = parseFloat(sameLineMatch[1]);
+        if (val >= 0 && val <= 100) return val;
+      }
+
+      // 2. 看后续2-3行，跳过同行/好评/复购相关行
+      for (const line of lines.slice(1, 4)) {
+        if (/同行|好评|复购/.test(line)) continue;
+        const match = line.match(/(\d+\.?\d*)%/);
+        if (match) {
+          const val = parseFloat(match[1]);
+          if (val >= 0 && val <= 100) return val;
+        }
+      }
+      return null;
+    }
+
+    // 辅助函数：查找字符串在文本中所有出现位置
+    function findAllOccurrences(text, search) {
+      const indices = [];
+      let idx = text.indexOf(search);
+      while (idx !== -1) {
+        indices.push(idx);
+        idx = text.indexOf(search, idx + 1);
+      }
+      return indices;
+    }
+
+    // 策略1：从全页面提取第一个退款率作为总退款率
+    // 页面中第一个出现的 退款率 始终是"全部"卡片的数据
+    refundRate = extractRefundRateFromText(pageText);
+    if (refundRate !== null) {
+      refundRate = String(refundRate);
+    }
+
+    // 策略2：提取发货前退款率
+    // 查找所有"发货前"出现位置，对每个位置检查其所在区域（到下一个卡片标题为止）
+    // 是否包含 退款率，找到第一个有数据的区域即可
+    const preShipPositions = findAllOccurrences(pageText, '发货前');
+    const otherBoundaries = ['未收货', '已收货'];
+    for (const pos of preShipPositions) {
+      // 找到该位置之后最近的其他卡片标题作为区域边界
+      let nextBound = pageText.length;
+      for (const boundary of otherBoundaries) {
+        const bIdx = pageText.indexOf(boundary, pos + 1);
+        if (bIdx !== -1 && bIdx < nextBound) nextBound = bIdx;
+      }
+      const sectionText = pageText.substring(pos, nextBound);
+      // 只在该区域内查找退款率（避免误匹配其他卡片的数据）
+      if (sectionText.indexOf('退款率') === -1) continue;
+      preShipRefundRate = extractRefundRateFromText(sectionText);
+      if (preShipRefundRate !== null) {
+        break;
       }
     }
 
-    // 如果没找到，尝试搜索页面中所有的百分比（排除"同行标杆"之类的）
-    if (!refundRate) {
-      const allRates = pageText.match(/\d+\.?\d*%/g);
-      if (allRates && allRates.length > 0) {
-        // 过滤掉"同行标杆"等非退款率数据
-        for (const rate of allRates) {
-          const numPart = rate.replace('%', '');
-          const num = parseFloat(numPart);
-          // 退款率通常是0-100%的数字
-          if (num >= 0 && num <= 100 && !pageText.includes('同行标杆' + rate)) {
-            // 确认这是退款率（前面有"退款"字）
-            const rateIdx = pageText.indexOf(rate);
-            const beforeText = pageText.substring(Math.max(0, rateIdx - 20), rateIdx);
-            if (beforeText.includes('退款') || beforeText.includes('退')) {
-              refundRate = numPart;
-              break;
-            }
-          }
-        }
+    // 计算修正发后退货率 = 总退款率 - 发货前退款率
+    if (refundRate !== null && preShipRefundRate !== null) {
+      const totalRate = parseFloat(refundRate);
+      if (preShipRefundRate > totalRate) {
+        console.log(`[WARN] 发货前退款率(${preShipRefundRate}%) > 退款率(${totalRate}%)，抓取异常，跳过修正发后退货率`);
+        postShipRefundRate = null;
+      } else {
+        postShipRefundRate = (totalRate - preShipRefundRate).toFixed(2);
       }
     }
 
@@ -1242,14 +1362,121 @@ async function getRefundRateFromDetailPage(context, page, productId) {
       }
     }
 
-    console.log(`提取到退货率: ${refundRate}%, 退款人数: ${refundCount}, 退款订单数: ${refundOrderCount}`);
+    console.log(`提取到退货率: ${refundRate}%, 发货前退款率: ${preShipRefundRate}%, 修正发后退货率: ${postShipRefundRate}%, 退款人数: ${refundCount}, 退款订单数: ${refundOrderCount}`);
     console.log(`详情页URL: ${detailPage.url()}`);
 
     // 退款人数少于3人，数据不准确，跳过修正退货率（保持为空）
     if (refundCount !== null && refundCount < 3) {
       console.log(`退款人数(${refundCount})少于3人，数据不准确，跳过修正退货率`);
       refundRate = null;
+      postShipRefundRate = null;
     }
+
+    // 提取发货后退款率（从同一页面文本）
+    const postShipIdx = pageText.indexOf('发货后退款率');
+    if (postShipIdx !== -1) {
+      const chunk = pageText.substring(postShipIdx, postShipIdx + 200);
+      const rateMatch = chunk.match(/(\d+\.?\d*)%/);
+      if (rateMatch) {
+        postShippingRate = rateMatch[1];
+      }
+    }
+
+    // 如果没找到"发货后退款率"，尝试其他关键词
+    if (!postShippingRate) {
+      const altKeywords = ['发货后退款', '发货后退货率', '已发货退款率'];
+      for (const keyword of altKeywords) {
+        const idx = pageText.indexOf(keyword);
+        if (idx !== -1) {
+          const chunk = pageText.substring(idx, idx + 200);
+          const rateMatch = chunk.match(/(\d+\.?\d*)%/);
+          if (rateMatch) {
+            postShippingRate = rateMatch[1];
+            console.log(`通过关键词"${keyword}"找到发货后退款率`);
+            break;
+          }
+        }
+      }
+    }
+
+    // 如果还没找到，搜索所有百分比，找"发货"附近的
+    if (!postShippingRate) {
+      const allRates = pageText.match(/\d+\.?\d*%/g);
+      if (allRates) {
+        for (const rate of allRates) {
+          const rateIdx = pageText.indexOf(rate);
+          const beforeText = pageText.substring(Math.max(0, rateIdx - 50), rateIdx);
+          if (beforeText.includes('发货后') || beforeText.includes('已发货')) {
+            postShippingRate = rate.replace('%', '');
+            console.log(`通过上下文匹配找到发货后退款率`);
+            break;
+          }
+        }
+      }
+    }
+
+    console.log(`发货后退款率: ${postShippingRate}%`);
+
+    // 提取月广告消耗
+    // 尝试在当前页面查找
+    const adKeywords = ['月广告消耗', '广告消耗', '本月广告消耗', '月推广消耗', '推广消耗'];
+    for (const keyword of adKeywords) {
+      const idx = pageText.indexOf(keyword);
+      if (idx !== -1) {
+        const chunk = pageText.substring(idx, idx + 100);
+        // 匹配金额格式：¥123.45 或 123.45
+        const amountMatch = chunk.match(/[¥￥]?\s*([\d,]+\.?\d*)/);
+        if (amountMatch) {
+          adSpend = amountMatch[1].replace(/,/g, '');
+          console.log(`通过关键词"${keyword}"找到广告消耗: ${adSpend}`);
+          break;
+        }
+      }
+    }
+
+    // 如果当前页面没有，尝试点击"推广"或"流量"标签
+    if (!adSpend) {
+      console.log('当前页面未找到广告消耗，尝试查找推广/流量标签...');
+      const tabClicked = await detailPage.evaluate(() => {
+        const allElements = document.querySelectorAll('*');
+        for (const el of allElements) {
+          const text = (el.innerText || '').trim();
+          const rect = el.getBoundingClientRect();
+          // 点击顶部标签区域的元素
+          if ((text === '推广' || text === '流量' || text === '广告' || text === '推广效果') &&
+              rect.top < 300 && rect.width < 200 && rect.width > 20 && el.offsetParent !== null) {
+            el.click();
+            return text;
+          }
+        }
+        return null;
+      });
+
+      if (tabClicked) {
+        console.log(`点击了"${tabClicked}"标签，等待15秒...`);
+        await sleep(15000);
+
+        if (!detailPage.isClosed()) {
+          const adPageText = await detailPage.evaluate(() => document.body.innerText);
+          for (const keyword of adKeywords) {
+            const idx = adPageText.indexOf(keyword);
+            if (idx !== -1) {
+              const chunk = adPageText.substring(idx, idx + 100);
+              const amountMatch = chunk.match(/[¥￥]?\s*([\d,]+\.?\d*)/);
+              if (amountMatch) {
+                adSpend = amountMatch[1].replace(/,/g, '');
+                console.log(`在${tabClicked}标签找到广告消耗: ${adSpend}`);
+                break;
+              }
+            }
+          }
+        }
+      } else {
+        console.log('未找到推广/流量标签');
+      }
+    }
+
+    console.log(`月广告消耗: ${adSpend}`);
   } catch (e) {
     console.log('提取页面内容失败:', e.message);
   }
@@ -1263,7 +1490,7 @@ async function getRefundRateFromDetailPage(context, page, productId) {
     console.log('关闭详情页失败:', e.message);
   }
 
-  return { rate: refundRate, refundOrderCount };
+  return { rate: refundRate, preShipRefundRate, postShipRefundRate, refundOrderCount, postShippingRate, adSpend };
 }
 
 // 从商品管理页面获取商品图片URL
@@ -1414,6 +1641,8 @@ async function extractProductsOnPage(page) {
     let ID_COL = 1;
     let ORDER_COL = 3;
     let RATE_COL = 4;
+    let POST_SHIP_COL = 5;
+    let AD_SPEND_COL = 6;
 
     // 从 thead 获取表头信息
     const thead = productTable.querySelector('thead');
@@ -1434,11 +1663,19 @@ async function extractProductsOnPage(page) {
           ORDER_COL = i;
         }
         // 匹配退款率列（精确匹配"退款率(支付时间)"）
-        if (headerText.includes('退款率') && headerText.includes('支付时间')) {
+        if (headerText.includes('退款率') && headerText.includes('支付时间') && !headerText.includes('发货后')) {
           RATE_COL = i;
         }
+        // 匹配发货后退款率列
+        if (headerText.includes('发货后退款率') && headerText.includes('支付时间')) {
+          POST_SHIP_COL = i;
+        }
+        // 匹配投放消耗列
+        if (headerText.includes('投放消耗') || headerText.includes('投放')) {
+          AD_SPEND_COL = i;
+        }
       }
-      console.log(`动态检测列位置: ID=${ID_COL}, 订单数=${ORDER_COL}, 退货率=${RATE_COL}`);
+      console.log(`动态检测列位置: ID=${ID_COL}, 订单数=${ORDER_COL}, 退货率=${RATE_COL}, 发货后退款率=${POST_SHIP_COL}, 投放消耗=${AD_SPEND_COL}`);
     } else {
       console.log('未找到表头，使用默认列位置');
     }
@@ -1498,6 +1735,26 @@ async function extractProductsOnPage(page) {
             returnRate = parseFloat(match[1]);
           }
         }
+        // 发货后退款率：从检测到的发货后退款率列精确提取
+        let postShipRate = -1;
+        if (cells[POST_SHIP_COL]) {
+          const cellText = (cells[POST_SHIP_COL].innerText || '').trim();
+          const match = cellText.match(/(\d+\.?\d*)%/);
+          if (match) {
+            postShipRate = parseFloat(match[1]);
+          }
+        }
+
+        // 投放消耗：从检测到的投放消耗列精确提取
+        let adSpend = -1;
+        if (cells[AD_SPEND_COL]) {
+          const cellText = (cells[AD_SPEND_COL].innerText || '').trim();
+          const match = cellText.match(/[¥￥]([\d,.]+)/);
+          if (match) {
+            adSpend = match[1].replace(/,/g, '');
+          }
+        }
+
         // 如果退货率列没提取到，回退到搜索百分数
         if (returnRate === -1) {
           for (let i = 0; i < cells.length; i++) {
@@ -1519,7 +1776,7 @@ async function extractProductsOnPage(page) {
             const cellText = (cells[i]?.innerText || '').trim().substring(0, 30);
             console.log(`  cells[${i}]: "${cellText}"`);
           }
-          console.log(`[调试] RATE_COL=${RATE_COL}, 提取到退款率=${returnRate}%`);
+          console.log(`[调试] RATE_COL=${RATE_COL}, POST_SHIP_COL=${POST_SHIP_COL}, AD_SPEND_COL=${AD_SPEND_COL}, 退款率=${returnRate}%, 发货后退款率=${postShipRate}%, 投放消耗=${adSpend}`);
         }
 
         results.push({
@@ -1528,10 +1785,11 @@ async function extractProductsOnPage(page) {
           link: '',
           orderCount: orderCount,
           listReturnRate: returnRate,
-          returnRate: returnRate
+          returnRate: postShipRate !== -1 ? postShipRate : null,
+          adSpend: adSpend
         });
 
-        console.log(`提取商品: ${id} - ${productName}, 订单数: ${orderCount}, 退款率: ${returnRate}%`);
+        console.log(`提取商品: ${id} - ${productName}, 订单数: ${orderCount}, 退款率(支付时间): ${returnRate}%, 发货后退款率: ${postShipRate}%, 投放消耗: ${adSpend}, 近30天退款率: ${returnRate}%, 修正退款率: ${postShipRate !== -1 ? postShipRate : null}%`);
       }
     });
 
@@ -2108,8 +2366,14 @@ async function processProductRound(page, context, targetCount, accessToken, shop
             let merchantCode = costOrderData.merchantCode;
             // 清理商家编码：去掉中文描述、颜色、尺码等
             merchantCode = merchantCode.replace(/[-_].*$/, '');  // 去掉 -灰色;L 等
-            merchantCode = merchantCode.replace(/[一-龥]+/g, '');  // 去掉中文
-            merchantCode = merchantCode.replace(/[^a-zA-Z0-9+]/g, '');  // 只保留字母数字+
+            // 保留特定中文词汇(套装/上衣/裤子)——仅当出现在末尾时
+            const endKeywords = /(套装|上衣|裤子)+$/;
+            const endMatch = merchantCode.match(endKeywords);
+            merchantCode = merchantCode.replace(/[一-龥]+/g, '');
+            if (endMatch) {
+              merchantCode += endMatch[0];
+            }
+            merchantCode = merchantCode.replace(/[^a-zA-Z0-9+\u4e00-\u9fff]/g, '').trim();  // 保留字母数字+中文
             console.log(`  商家编码: ${costOrderData.merchantCode} -> ${merchantCode}`);
             // 查询成本
             let newCost = null;
@@ -2159,12 +2423,21 @@ async function processProductRound(page, context, targetCount, accessToken, shop
       console.log(`  开始处理...`);
       console.log(`  开始处理，当前writeCount=${writeCount}`);
 
-      // 获取详情页退货率
-      const detailResult = await getRefundRateFromDetailPage(context, page, product.id);
+      // 获取详情页数据（退货率、退款人数、发货后退款率、广告消耗等）
+      const detailResult = await getDetailPageData(context, page, product.id);
       const realReturnRate = detailResult ? detailResult.rate : null;
 
+      console.log('[DEBUG] Before save: product.returnRate=' + product.returnRate + ', product.postShipRate=' + product.postShipRate);
+      if (product.returnRate !== undefined && product.returnRate !== null) {
+        product.postShipRate = product.returnRate;
+        console.log('[DEBUG] After save: product.postShipRate=' + product.postShipRate);
+      }
+
       if (realReturnRate) {
+        // Save original total refund rate before overwrite
+        product.totalRefundRate = realReturnRate;
         product.returnRate = realReturnRate;
+        console.log('[DEBUG] After overwrite: product.returnRate=' + product.returnRate + ', product.postShipRate=' + product.postShipRate);
         console.log(`>> 修正退货率: ${realReturnRate}%`);
       } else {
         // 修正退货率获取失败或退款人数不足，留空
@@ -2179,6 +2452,25 @@ async function processProductRound(page, context, targetCount, accessToken, shop
       } else {
         product.refundOrderCount = null;
       }
+
+      // 发货前退款率和修正发后退货率
+      if (detailResult && detailResult.preShipRefundRate !== null) {
+        product.preShipRefundRate = detailResult.preShipRefundRate;
+        console.log(`>> 发货前退款率: ${detailResult.preShipRefundRate}%`);
+      } else {
+        product.preShipRefundRate = null;
+      }
+      if (detailResult && detailResult.postShipRefundRate !== null) {
+        product.postShipRefundRate = detailResult.postShipRefundRate;
+        console.log(`>> 修正发后退货率: ${detailResult.postShipRefundRate}%`);
+      } else {
+        product.postShipRefundRate = null;
+      }
+
+      // 发货后退款率和月广告消耗（已从详情页一次提取）
+      if (detailResult && detailResult.postShippingRate) product.postShippingRate = detailResult.postShippingRate;
+      if (detailResult && detailResult.adSpend) product.adSpend = detailResult.adSpend;
+      console.log(`>> 发货后退款率: ${detailResult?.postShippingRate}%, 月广告消耗: ${detailResult?.adSpend}`);
 
       // 使用共享的订单页面获取商家编码、最新售价、商品图片
       console.log('>> 从订单列表获取数据...');
@@ -2367,10 +2659,15 @@ async function processProductRound(page, context, targetCount, accessToken, shop
           let processedCode = orderData.merchantCode;
           // 去掉连字符或下划线及其后面的所有内容（如 -XL, _XL, -浅蓝26 等）
           processedCode = processedCode.replace(/[-_].*$/, '');
-          // 去掉中文字符（保留数字和字母）
+          // 保留末尾的特定中文词汇(套装/上衣/裤子)
+          const endKeywords2 = /(套装|上衣|裤子)+$/;
+          const endMatch2 = processedCode.match(endKeywords2);
           processedCode = processedCode.replace(/[一-龥]+/g, '');
-          // 去掉所有剩余符号（保留字母、数字、+）
-          processedCode = processedCode.replace(/[^a-zA-Z0-9+]/g, '');
+          if (endMatch2) {
+            processedCode += endMatch2[0];
+          }
+          // 去掉所有剩余符号（保留字母、数字、+和中文）
+          processedCode = processedCode.replace(/[^a-zA-Z0-9+\u4e00-\u9fff]/g, '');
           // 处理省略前缀的情况：+732 → 前缀+732（使用第一个编码的前缀）
           const firstCodeMatch = processedCode.match(/^([a-zA-Z]+)\d+/);
           if (firstCodeMatch) {
@@ -2398,7 +2695,8 @@ async function processProductRound(page, context, targetCount, accessToken, shop
             }
             processedCode = first + '+' + restParts.join('+');
           } else if (allCodes && allCodes.length === 1) {
-            processedCode = allCodes[0];
+            const trailingMatch = processedCode.match(/(套装|上衣|裤子)$/);
+            processedCode = allCodes[0] + (trailingMatch ? trailingMatch[0] : '');
           }
           product.merchantCode = processedCode;
           product.merchantIncome = parseFloat(orderData.merchantIncome) || 0;
@@ -2440,11 +2738,11 @@ async function processProductRound(page, context, targetCount, accessToken, shop
           }
 
           // 数据校验：跳过明显异常的数据避免污染
-          const listRate = product.listReturnRate;
-          const correctedRate = product.returnRate;
+          const listRate = product.postShipRate;
+          const correctedRate = product.postShippingRate;
           const isInvalidRate = (r) => r === null || r === undefined || r === -1 || isNaN(r) || r < 0 || r > 100;
           if (isInvalidRate(listRate) || (correctedRate !== null && correctedRate !== undefined && isInvalidRate(correctedRate))) {
-            console.log(`>> 跳过：数据异常 (列表退货率=${listRate}%, 修正退货率=${correctedRate}%)，不写入飞书`);
+            console.log(`>> 跳过：数据异常 (发后退款率=${listRate}%, 修正发后退货率=${correctedRate}%)，不写入飞书`);
             continue;
           }
 
