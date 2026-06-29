@@ -1232,9 +1232,9 @@
                         finishedShops.add(idx);
                     }
                     // 等待进程结束（只在需要时等待）
-                    // 超时按 targetCount 动态计算：每条约需60秒（含页面等待），再加120秒余量
+                    // 超时按 targetCount 动态计算：每条约需150秒（2.5分钟，含页面等待），再加180秒余量
                     if (autoRunning && success && shouldWaitForProcess) {
-                        const maxWaitSec = Math.max(120, targetCount * 60 + 120);
+                        const maxWaitSec = Math.max(300, targetCount * 150 + 180);
                         const maxWaitCount = Math.ceil(maxWaitSec / 3);
                         let waitCount = 0;
                         while (autoRunning && waitCount < maxWaitCount) {
