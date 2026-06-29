@@ -205,11 +205,11 @@ function parseShopName(ocrText) {
     name = name.replace(/\s*[./·\-\u2013\u2014\u0300\u0301\u0304\u0306]+\s*/g, '');
     // 先去掉Markdown OCR常见后缀（必须在去掉销售单之前）
     name = name.replace(/\s*(?:单据完整信息|完整信息提取|信息提取)[：:]?\s*$/, '').trim();
-    name = name.replace(/\s*(?:销售退货单|退货单|销售单据|销售单|收款单)\s*$/, '').trim();
+    name = name.replace(/\s*(?:销售退货单|退货单|销售单据|销售单|收款单|销售)\s*$/, '').trim();
     // 去掉客户联/存根联后缀（OCR有时会把它们粘到同一行）
     name = name.replace(/\s*(?:客户联|存根联)\s*$/, '').trim();
     // 客户联去掉后，销售单可能暴露到末尾，再清一次
-    name = name.replace(/\s*(?:销售退货单|退货单|销售单据|销售单|收款单)\s*$/, '').trim();
+    name = name.replace(/\s*(?:销售退货单|退货单|销售单据|销售单|收款单|销售)\s*$/, '').trim();
     name = name.replace(/\s*(?:完整信息提取|信息提取)[：:]?\s*$/, '').trim();
     // 第三步：去掉地址（欧洲城、欧洲城店、国际面料城、万象汇、万象会、世贸、万达、广场、商城）
     name = name.replace(/(欧洲城店|欧洲城|国际面料城|万象汇|万象会|世贸|万达|广场|商城|合泰轻纺城|和泰轻纺城)/g, '');
@@ -226,9 +226,9 @@ function parseShopName(ocrText) {
     if (!name.trim() && firstContentLine) {
         name = firstContentLine;
         name = name.replace(/[（()）【】\[\]]+/g, '');
-        name = name.replace(/\s*(?:销售退货单|退货单|销售单据|销售单)\s*$/, '').trim();
+        name = name.replace(/\s*(?:销售退货单|退货单|销售单据|销售单|销售)\s*$/, '').trim();
         name = name.replace(/\s*(?:客户联|存根联)\s*$/, '').trim();
-        name = name.replace(/\s*(?:销售退货单|退货单|销售单据|销售单)\s*$/, '').trim();
+        name = name.replace(/\s*(?:销售退货单|退货单|销售单据|销售单|销售)\s*$/, '').trim();
         name = name.replace(/(欧洲城店|欧洲城|国际面料城|万象汇|万象会|世贸|万达|广场|商城|合泰轻纺城|和泰轻纺城)/g, '');
         name = name.replace(/服饰厂\s*$/, '').replace(/服饰\s*$/, '').trim();
         name = name.replace(/(女裤|裤业|时尚女装)\s*$/, '').trim();
