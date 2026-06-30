@@ -11,6 +11,20 @@ const os = require('os');
 const crypto = require('crypto');
 const { spawn, execSync } = require('child_process');
 
+// ========== 票据录入系统路由 ==========
+const billAuth = require('./bill-routes/auth');
+const billCrud = require('./bill-routes/bill-crud');
+const billOcr = require('./bill-routes/bill-ocr');
+
+function readJsonBody(req) {
+    return new Promise(resolve => {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => { try { resolve(JSON.parse(body)); } catch { resolve({}); } });
+    });
+}
+// ========== 票据路由结束 ==========
+
 const PORT = 3003;
 const HTTPS_PORT = parseInt(process.env.HTTPS_PORT) || 3443;
 // 项目独立运行，路径基于脚本所在目录
@@ -300,7 +314,7 @@ function validateLogParams(hours, lines) {
 }
 
 // 路由处理
-function handleRequest(req, res) {
+async function handleRequest(req, res) {
     // 设置CORS和缓存控制
     const origin = req.headers.origin;
     const allowedOrigin = `https://localhost:${HTTPS_PORT}`;
@@ -1131,6 +1145,124 @@ function handleRequest(req, res) {
         res.end(JSON.stringify({ success: true }));
         return;
     }
+
+    // ========== 票据录入系统路由 ==========
+    // 静态文件: bill-ui.html
+    if (req.url === '/bill-ui.html' || req.url === '/bill-ui') {
+        const htmlPath = path.join(WORKSPACE, 'bill-ui.html');
+        if (fs.existsSync(htmlPath)) {
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            fs.createReadStream(htmlPath).pipe(res);
+            return;
+        }
+    }
+
+    // 票据API路由（使用自己的JWT鉴权，不依赖API_TOKEN）
+    if (req.url === '/api/bill/register' && req.method === 'POST') {
+        const body = await readJsonBody(req);
+        const r = billAuth.register(body);
+        res.writeHead(r.error ? 400 : 200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(r));
+        return;
+    }
+    if (req.url === '/api/bill/login' && req.method === 'POST') {
+        const body = await readJsonBody(req);
+        const r = billAuth.login(body);
+        res.writeHead(r.error ? 400 : 200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(r));
+        return;
+    }
+    if (req.url === '/api/bill/me') {
+        const r = billAuth.me(req.headers.authorization);
+        res.writeHead(r.error ? 401 : 200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(r));
+        return;
+    }
+    if (req.url === '/api/bill/bills' && req.method === 'POST') {
+        const body = await readJsonBody(req);
+        const r = billCrud.save(body, req.headers.authorization);
+        res.writeHead(r.error ? 400 : 200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(r));
+        return;
+    }
+    if (req.url && req.url.startsWith('/api/bill/bills') && req.method === 'GET') {
+        const urlObj = new URL(req.url, `http://${req.headers.host}`);
+        const query = Object.fromEntries(urlObj.searchParams);
+        const r = billCrud.list(query, req.headers.authorization);
+        res.writeHead(r.error ? 401 : 200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(r));
+        return;
+    }
+    if (req.url && req.url.match(/^\/api\/bill\/bills\/\d+$/) && req.method === 'PUT') {
+        const id = req.url.split('/').pop();
+        const body = await readJsonBody(req);
+        const r = billCrud.update(id, body, req.headers.authorization);
+        res.writeHead(r.error ? 400 : 200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(r));
+        return;
+    }
+    if (req.url === '/api/bill/shops') {
+        const r = billCrud.getShopNames(req.headers.authorization);
+        res.writeHead(r.error ? 401 : 200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(r));
+        return;
+    }
+    if (req.url === '/api/bill/ocr' && req.method === 'POST') {
+        // 简单的multipart解析（处理单文件上传）
+        const authHeader = req.headers.authorization;
+        const user = billAuth.verifyToken(authHeader);
+        if (!user) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: '未登录' }));
+            return;
+        }
+        const contentType = req.headers['content-type'] || '';
+        const boundary = contentType.split('boundary=')[1];
+        if (!boundary) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: '无效的请求格式' }));
+            return;
+        }
+        let chunks = [];
+        req.on('data', chunk => chunks.push(chunk));
+        req.on('end', async () => {
+            try {
+                const buffer = Buffer.concat(chunks);
+                const parts = buffer.toString('binary').split('--' + boundary);
+                let filepath = null;
+                let filename = null;
+                for (const part of parts) {
+                    const fnMatch = part.match(/filename="([^"]+)"/);
+                    if (!fnMatch) continue;
+                    const headerEnd = part.indexOf('\r\n\r\n') + 4;
+                    const fileData = part.slice(headerEnd, part.lastIndexOf('\r\n'));
+                    filename = Date.now() + '_' + fnMatch[1];
+                    filepath = path.join(WORKSPACE, 'bill-db', 'uploads', filename);
+                    const uploadDir = path.join(WORKSPACE, 'bill-db', 'uploads');
+                    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+                    fs.writeFileSync(filepath, Buffer.from(fileData, 'binary'));
+                    break;
+                }
+                if (!filepath) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: '未找到上传文件' }));
+                    return;
+                }
+                const ocrText = await billOcr.ocrImage(filepath);
+                const parsed = billOcr.parseOcrText(ocrText);
+                if (user.customer_name) parsed.客户 = user.customer_name;
+                parsed.created_by = user.phone;
+                parsed.image_path = filepath;
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(parsed));
+            } catch (e) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: e.message }));
+            }
+        });
+        return;
+    }
+    // ========== 票据路由结束 ==========
 
     // 404
     res.writeHead(404);
