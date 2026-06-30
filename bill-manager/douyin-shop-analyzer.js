@@ -338,6 +338,11 @@ async function checkRecentRecord(accessToken, productId) {
 
             // 3. 订单数>=10
             const orderNum = typeof orderCount === 'number' ? orderCount : parseInt(orderCount) || 0;
+            // 销量=1：只要有记录就跳过（不需要退货率数据）
+            if (orderNum === 1) {
+              console.log(`  跳过：销量=1，无需更新退货率`);
+              return true;
+            }
             if (orderNum >= 10) {
               if (hoursDiff < 24) {
                 console.log(`  跳过：订单数${orderNum}>=10，差${hoursDiff.toFixed(1)}小时<24小时`);
@@ -493,7 +498,7 @@ async function cleanOldRecords(accessToken, shopName, minOrderCount) {
 
           // 检查是否需要删除：记录时间超过10天 且 订单数>=最小订单数
           const daysDiff = (now - recordTimeMs) / (1000 * 60 * 60 * 24);
-          if (daysDiff > 10 && orderNum >= minOrderCount) {
+          if ((daysDiff > 10 && orderNum >= minOrderCount) || (orderNum === 1 && daysDiff > 10)) {
             const dateStr = new Date(recordTimeMs).toISOString().split('T')[0];
             console.log(`  [删除] 商品ID: ${item.fields['商品id']}, 订单数: ${orderNum}, 记录日期: ${dateStr}, ${daysDiff.toFixed(1)}天前`);
 
@@ -652,6 +657,15 @@ async function writeToFeishu(accessToken, products, shopName) {
     if (product.cost !== undefined && product.cost !== null) {
       fields['成本'] = Number(product.cost);
     }
+
+    // 销量=1的简化处理：只看毛利>=40，不计算退货率
+    if ((product.orderCount || 0) === 1 && product.merchantIncome && product.cost != null) {
+      const gross = product.merchantIncome - product.cost;
+      fields['毛利'] = Number(gross.toFixed(2));
+      fields['平均每单利润'] = Number(gross.toFixed(2));
+      console.log(`  销量=1简化: 售价${product.merchantIncome} - 成本${product.cost} = 毛利${gross.toFixed(2)}元${gross >= 40 ? ' ✓达标' : ' 未达标'}`);
+      // 不计算退货率相关建议，直接写入
+    } else {
 
     // 100%退货率：亏损 = 邮费+运费险（不需要成本）
     const orderNumForLoss = product.orderCount || 0;
@@ -1095,6 +1109,7 @@ async function writeToFeishu(accessToken, products, shopName) {
         allSuccess = false;
       }
     }
+    } // end else (orderCount !== 1)
   }
 
   return allSuccess;
@@ -2424,7 +2439,13 @@ async function processProductRound(page, context, targetCount, accessToken, shop
       console.log(`  开始处理，当前writeCount=${writeCount}`);
 
       // 获取详情页数据（退货率、退款人数、发货后退款率、广告消耗等）
-      const detailResult = await getDetailPageData(context, page, product.id);
+      // 销量=1时跳过退货率抓取（不需要判断退货率）
+      let detailResult = null;
+      if (product.orderCount === 1) {
+        console.log('  销量=1，跳过退货率详情页抓取');
+      } else {
+        detailResult = await getDetailPageData(context, page, product.id);
+      }
       const realReturnRate = detailResult ? detailResult.rate : null;
 
       console.log('[DEBUG] Before save: product.returnRate=' + product.returnRate + ', product.postShipRate=' + product.postShipRate);
