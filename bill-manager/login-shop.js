@@ -101,7 +101,7 @@ async function main() {
       }
       return results;
     });
-    console.log('右上角候选元素:', JSON.stringify(candidates, null, 2));
+    console.log('右上角候选元素:', candidates.length, '个');
 
     let shopName = await page.evaluate(() => {
       const allElements = document.querySelectorAll('*');

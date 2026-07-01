@@ -59,10 +59,11 @@ acquireLock();
 
 function getPinyinInitials(chinese) {
     if (!chinese) return '';
-    // 特例：巴芘仑 -> BBL, 欣焯怡 -> XZY, 靓点红怡纯 -> LDHYC
+    // 特例：巴芘仑 -> BBL, 欣焯怡 -> XZY, 靓点红怡纯 -> LDHYC, 5彩缤纷 -> WCBF
     if (chinese === '巴芘仑') return 'BBL';
     if (chinese === '欣焯怡') return 'XZY';
     if (chinese === '靓点红怡纯') return 'LDHYC';
+    if (chinese === '5彩缤纷') return 'WCBF';
     try {
         const script = path.join(__dirname, 'pinyin_initials.py');
         const result = execSync(

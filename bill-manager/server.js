@@ -319,7 +319,7 @@ async function handleRequest(req, res) {
     const origin = req.headers.origin;
     const allowedOrigin = `https://localhost:${HTTPS_PORT}`;
     res.setHeader('Access-Control-Allow-Origin', origin === allowedOrigin ? origin : allowedOrigin);
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
 
@@ -526,6 +526,7 @@ async function handleRequest(req, res) {
         if (targetDir) pyArgs.push(targetDir);
         const py = spawn('python', pyArgs, {
             shell: true,
+            windowsHide: true,
             cwd: WORKSPACE,
             env: { ...process.env, PYTHONUNBUFFERED: '1' }
         });
@@ -573,6 +574,7 @@ async function handleRequest(req, res) {
 
         const node = spawn('node', [path.join(WORKSPACE, 'arrange2.js')], {
             shell: true,
+            windowsHide: true,
             cwd: WORKSPACE,
             env: { ...process.env, NODE_OPTIONS: '' }
         });
@@ -663,6 +665,7 @@ async function handleRequest(req, res) {
             const douyinScript = path.join(WORKSPACE, 'douyin-shop-analyzer.js');
             const node = spawn('node', [douyinScript, targetCount.toString()], {
                 shell: true,
+                windowsHide: true,
                 cwd: WORKSPACE
             });
             douyinProcess = node;
@@ -776,6 +779,7 @@ async function handleRequest(req, res) {
             const douyinScript = path.join(WORKSPACE, 'douyin-shop-analyzer.js');
             const node = spawn('node', [douyinScript, targetCount.toString(), intervalMinutes.toString(), 'multi'], {
                 shell: true,
+                windowsHide: true,
                 cwd: WORKSPACE
             });
             douyinMultiProcess = node;
@@ -865,6 +869,7 @@ async function handleRequest(req, res) {
         const loginScript = path.join(WORKSPACE, 'login-shop.js');
         const node = spawn('node', [loginScript], {
             shell: true,
+            windowsHide: true,
             cwd: WORKSPACE
         });
 
@@ -958,7 +963,7 @@ async function handleRequest(req, res) {
             res.end(JSON.stringify({ success: false, message: '拼多多登录脚本不存在，请先创建 pdd-login-shop.js' }));
             return;
         }
-        const node = spawn('node', [pddLoginScript], { shell: true, cwd: WORKSPACE });
+        const node = spawn('node', [pddLoginScript], { shell: true, windowsHide: true, cwd: WORKSPACE });
         let shopName = '';
         node.stdout.on('data', (data) => {
             const msg = data.toString().trim();
@@ -1036,7 +1041,7 @@ async function handleRequest(req, res) {
             fs.writeFileSync(shopNameFile, Buffer.from(shopName, 'utf8'));
             const feeConfigFile = path.join(WORKSPACE, 'fee_config.json');
             fs.writeFileSync(feeConfigFile, JSON.stringify({ shippingFee, insurance }));
-            const node = spawn('node', [pddScript, targetCount.toString()], { shell: true, cwd: WORKSPACE });
+            const node = spawn('node', [pddScript, targetCount.toString()], { shell: true, windowsHide: true, cwd: WORKSPACE });
             pddProcess = node;
             node.stdout.on('data', (data) => { const msg = data.toString().trim(); if (msg) shopLog(msg); });
             node.stderr.on('data', (data) => { const msg = data.toString().trim(); if (msg) shopLog('[错误] ' + msg); });
@@ -1101,7 +1106,7 @@ async function handleRequest(req, res) {
         req.on('data', () => {});
         req.on('end', () => {});
         log(`=== ${SHUTDOWN_DELAY_SEC}秒后自动关机 ===`);
-        spawn('shutdown', ['-s', '-t', String(SHUTDOWN_DELAY_SEC)], { shell: true });
+        spawn('shutdown', ['-s', '-t', String(SHUTDOWN_DELAY_SEC)], { shell: true, windowsHide: true });
         shutdownScheduledAt = Date.now(); // 记录调度时间
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true }));
@@ -1138,7 +1143,7 @@ async function handleRequest(req, res) {
         // 消费请求体（避免连接泄漏）
         req.on('data', () => {});
         req.on('end', () => {});
-        spawn('shutdown', ['/a'], { shell: true });
+        spawn('shutdown', ['/a'], { shell: true, windowsHide: true });
         shutdownScheduledAt = null; // 清理标志位
         log('=== 已取消自动关机 ===');
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1248,14 +1253,56 @@ async function handleRequest(req, res) {
                     res.end(JSON.stringify({ error: '未找到上传文件' }));
                     return;
                 }
-                const ocrText = await billOcr.ocrImage(filepath);
-                const parsed = billOcr.parseOcrText(ocrText);
-                if (user.customer_name) parsed.客户 = user.customer_name;
-                parsed.created_by = user.phone;
-                parsed.image_path = filepath;
+
+                // 调用 bill_image.py --single 进行OCR和解析（复用已验证的正则逻辑）
+                const billPy = path.join(WORKSPACE, 'bill_image.py');
+                const pyResult = await new Promise((resolve, reject) => {
+                    const py = spawn('python', ['-u', billPy, '--single', filepath, '', user.phone || ''], {
+                        shell: true,
+                        windowsHide: true,
+                        cwd: WORKSPACE,
+                        env: { ...process.env, PYTHONUNBUFFERED: '1' }
+                    });
+                    let stdout = '';
+                    let stderr = '';
+                    py.stdout.on('data', d => stdout += d.toString());
+                    py.stderr.on('data', d => stderr += d.toString());
+                    py.on('close', (code) => {
+                        if (stderr) log('[OCR] ' + stderr.trim());
+                        // 从stdout中提取最后一行JSON（前面可能有调试输出）
+                        const lines = stdout.trim().split('\n');
+                        let jsonStr = '';
+                        for (let i = lines.length - 1; i >= 0; i--) {
+                            try {
+                                JSON.parse(lines[i]);
+                                jsonStr = lines[i];
+                                break;
+                            } catch {}
+                        }
+                        if (jsonStr) {
+                            resolve(JSON.parse(jsonStr));
+                        } else {
+                            reject(new Error('bill_image.py 未返回有效JSON: ' + stdout.slice(0, 300)));
+                        }
+                    });
+                    py.on('error', reject);
+                });
+
+                if (!pyResult.success) {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: pyResult.error || 'OCR识别失败' }));
+                    return;
+                }
+
+                // bill_image.py已统一写入飞书+SQLite，server.js只返回结果给前端
+                log(`[OCR] 单张识别成功: ${pyResult.shop_name||'??'} ${pyResult.batch||'??'} ${pyResult.bill_date||'??'}`);
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify(parsed));
+                res.end(JSON.stringify({
+                    success: true,
+                    ocr: pyResult
+                }));
             } catch (e) {
+                log('[OCR] 异常: ' + e.message);
                 res.writeHead(500, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: e.message }));
             }

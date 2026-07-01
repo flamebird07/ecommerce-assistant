@@ -32,6 +32,7 @@ const VIDEO_PATH = args[4] || '';
 const SEQ_NO = args[5] || '001';
 const TOTAL_IMAGES = parseInt(args[6]) || 1;
 const CURRENT_IMAGE = parseInt(args[7]) || 1;
+const CREATED_BY = args[8] || '18973384605';  // created_by (用户手机号，默认值)
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -122,6 +123,14 @@ function parsePrintTime(ocrText) {
     if (tsMatch2) return { full: tsMatch2[1], date: tsMatch2[1].split(' ')[0] };
     const dMatch = ocrText.match(/(\d{4}-\d{2}-\d{2})/);
     if (dMatch) return { full: dMatch[1], date: dMatch[1] };
+    // 兼容2位年份（如 26-06-24 16:55 → 2026-06-24 16:55）
+    const ts2Match = ocrText.match(/(\d{2})-(\d{2})-(\d{2})\s+(\d{2}:\d{2}(?::\d{2})?)/);
+    if (ts2Match) {
+        const prefix = parseInt(ts2Match[1]) >= 50 ? '19' : '20';
+        const full = `${prefix}${ts2Match[1]}-${ts2Match[2]}-${ts2Match[3]} ${ts2Match[4]}`;
+        const date = `${prefix}${ts2Match[1]}-${ts2Match[2]}-${ts2Match[3]}`;
+        return { full, date };
+    }
     return null;
 }
 
@@ -142,7 +151,7 @@ function parseBillDate(ocrText) {
 
 function parseBatch(ocrText) {
     // 先尝试批次（行首或换行后，兼容"- "前缀），再尝试小票/单号/单据号
-    const m = ocrText.match(/(?:^|\n)\s*(?:[-*]\s*)?(?:批次|小票|单号|单据号)[:：]\s*(\S+)/);
+    const m = ocrText.match(/(?:^|\n)\s*(?:[-*]\s*)?(?:批次|班次|小票|单号|单据号)[:：]\s*(\S+)/);
     let b = '';
     if (m) b = m[1].replace(/^[^0-9A-Za-z]+/, '').trim();
     // 兼容订单编号
@@ -217,6 +226,8 @@ function parseShopName(ocrText) {
     name = name.replace(/服饰厂\s*$/, '').replace(/服饰\s*$/, '').trim();
     // 去掉女裤裤业等后缀
     name = name.replace(/(女裤|裤业|时尚女装)\s*$/, '').trim();
+    // 去掉门店后缀
+    name = name.replace(/门店\s*$/, '').trim();
     // 去掉产品描述后缀
     name = name.replace(/(半身裙|连衣裙|T恤|衬衫|裤子|短裙|外套|上衣|套装)\s*$/, '').trim();
     // 去掉楼层房号（4楼-430或4楼-430号后面接商店名）
@@ -377,7 +388,7 @@ function parseSalesQuantity(ocrText) {
             while (parts.length > 0 && parts[0] === '') parts.shift();
             while (parts.length > 0 && parts[parts.length - 1] === '') parts.pop();
             // 检查是否是表头行，找到"数量"或"件数"列的位置
-            if (line.includes('款号') || line.includes('名称') || line.includes('商品')) {
+            if (line.includes('款号') || line.includes('名称') || line.includes('商品') || line.includes('货号')) {
                 // 优先精确匹配"数量"或"件数"，避免"颜色规格(数量)"误匹配
                 let numIdx = parts.findIndex(p => p === '数量' || p === '件数');
                 if (numIdx < 0) numIdx = parts.findIndex(p => p === '小计');
@@ -396,6 +407,8 @@ function parseSalesQuantity(ocrText) {
             }
         }
         // 匹配普通格式: 款号 名称 数量 单价 金额
+        // 跳过表头行（含货号、颜色、单价、数量等关键词）
+        if (/货号|颜色|单价|数量|小计|件数/.test(line)) continue;
         const plainM = line.match(/^[^\s]+\s+[^\s]+\s+(\d{1,10})\s+\d/);
         if (plainM) { salesTotal += parseInt(plainM[1]); }
     }
@@ -458,7 +471,7 @@ function parseReturnQuantity(ocrText) {
             const parts = line.split('|').map(p => p.trim());
             while (parts.length > 0 && parts[0] === '') parts.shift();
             while (parts.length > 0 && parts[parts.length - 1] === '') parts.pop();
-            if (line.includes('款号') || line.includes('名称') || line.includes('商品')) {
+            if (line.includes('款号') || line.includes('名称') || line.includes('商品') || line.includes('货号')) {
                 let numIdx = parts.findIndex(p => p === '数量' || p === '件数');
                 if (numIdx < 0) numIdx = parts.findIndex(p => p === '小计');
                 if (numIdx < 0) numIdx = parts.findIndex(p => (p.includes('数量') || p.includes('件数')) && !p.includes('(') && !p.includes('（'));
@@ -474,6 +487,8 @@ function parseReturnQuantity(ocrText) {
                 }
             }
         }
+        // 跳过表头行
+        if (/货号|颜色|单价|数量|小计|件数/.test(line)) continue;
         const plainM = line.match(/^[^\s]+\s+[^\s]+\s+(-\d{1,10})\s+\d/);
         if (plainM) { returnTotal += Math.abs(parseInt(plainM[1])); }
     }
@@ -558,7 +573,9 @@ async function main() {
 
     for (let i = 0; i < bills.length; i++) {
         const bill = bills[i];
-        const { ocr_text: ocrText, screenshot: imgPath, segment_id: segId } = bill;
+        const { ocr_text: rawOcrText, screenshot: imgPath, segment_id: segId } = bill;
+        // 预处理：去掉 markdown 加粗标记，避免影响正则匹配
+        const ocrText = rawOcrText.replace(/\*\*/g, '');
 
         const parsed = parsePrintTime(ocrText);
         const billDateStr = parseBillDate(ocrText);
@@ -587,6 +604,10 @@ async function main() {
                 if (returnQty === 0 && salesQty === 0) {
                     // 都没识别到，用总数作为拿货件数
                     salesQty = Math.abs(totalQty);
+                } else if (totalQty < 0) {
+                    // 总数为负 → 纯退货单，所有件数都是退货
+                    salesQty = 0;
+                    returnQty = Math.abs(totalQty);
                 }
             }
         }
@@ -641,7 +662,8 @@ async function main() {
             "累计结余": cumBalance,
             "付款金额": paymentAmt,
             "拿货件数": salesQty,
-            "退货件数": returnQty
+            "退货件数": returnQty,
+            "created_by": CREATED_BY
         };
         if (billDateMs) fields["开单日期"] = billDateMs;
         if (fileToken) fields["单据截图"] = [{ file_token: fileToken, name: `bill_seg${segId}.jpg` }];
@@ -649,7 +671,7 @@ async function main() {
         // 录入日志
         console.log(`  [${CURRENT_IMAGE}/${TOTAL_IMAGES}] 档口:${shopName || '??'} 批次:${batchNo || '??'} 上次结余:${prevBalance} 累计结余:${cumBalance} 付款:${paymentAmt} 拿货:${salesQty} 退货:${returnQty} ${errorNote ? '⚠ ' + errorNote : '✓'}`);
 
-        await sleep(500);  // 限速延迟
+        await sleep(500);
         const res = await createRecord(token, fields);
         if (!res || res.error || res.code !== 0) {
             process.stderr.write('record_res:' + JSON.stringify(res) + '\n');
@@ -659,6 +681,8 @@ async function main() {
         } else if (res.code === 0) {
             successCount++;
             console.log(`  [${CURRENT_IMAGE}/${TOTAL_IMAGES}] ✅ ${shopName} ${batchNo} error=${errorNote || 'OK'}`);
+            // 输出解析结果供SQLite同步使用
+            console.log('__BILL_FIELDS__' + JSON.stringify(fields));
             // 只有录入成功且无识别错误时才重命名图片/视频，方便出错时重新录入
             if (!errorNote && VIDEO_PATH) {
                 const ext = path.extname(VIDEO_PATH);

@@ -1,7 +1,5 @@
 # 日志文件
 *.log
-bill-manager/server.log
-bill-manager/server_output.log
 
 # 临时文件
 *.lock
@@ -11,14 +9,24 @@ bill-manager/current_shop.txt
 bill-manager/fee_config.json
 bill-manager/dir_config.json
 bill-manager/pdd_products.json
+bill-manager/.hermes/
+bill-manager/.tls/
 
 # Cookie文件（敏感信息）
 bill-manager/cookies/
 bill-manager/pdd-cookies/
 
-# 截图文件
-bill-manager/product-list-final-*.png
-bill-manager/step*.png
+# 数据库文件（运行时生成）
+bill-manager/bill-db/*.db
+bill-manager/bill-db/*.db-shm
+bill-manager/bill-db/*.db-wal
+
+# 上传文件
+bill-manager/bill-db/uploads/
+
+# 已录入的图片
+bill-manager/bill-db/已录入_*.jpg
+bill-manager/已录入_*.jpg
 
 # 测试文件
 bill-manager/test-*.js
@@ -30,8 +38,26 @@ bill-manager/pdd-test-output.txt
 bill-manager/pdd-debug.json
 bill-manager/pdd-product-data.png
 bill-manager/pdd-shop-name.png
+bill-manager/bill-db/test_bill.jpg
+bill-manager/bill-db/mark-created-by.py
+0.70
 
 # 启动脚本
 bill-manager/start-hidden.py
 bill-manager/start-hidden.vbs
 bill-manager/start-server.bat
+
+# 截图文件
+*.png
+bill-manager/product-list-final-*.png
+bill-manager/step*.png
+
+# 调试截图
+bill-manager/debug-*.png
+bill-manager/shop-name-*.png
+bill-manager/detail-page-*.png
+bill-manager/step*.png
+
+# 运行日志
+scrape-run-log.txt
+bill-manager/scrape-metrics-result.json

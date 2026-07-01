@@ -13,16 +13,19 @@ function save(body, authHeader) {
   try {
     const r = db.prepare(`INSERT INTO bills_1号
       (单据内容,单据截图,单据打印时间,开单日期,记录时间,是否错误,批次号,
-       档口名称,上次结余,累计结余,付款金额,拿货件数,退货件数,客户,地址,created_by,status)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-      body.单据内容 || '', body.单据截图 || '', body.单据打印时间 || Date.now(),
+       档口名称,上次结余,累计结余,付款金额,拿货件数,退货件数,客户,地址,created_by,status,单据性质)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      body.单据内容 ?? '', body.单据截图 ?? '', body.单据打印时间 ?? Date.now(),
       body.开单日期 ? new Date(body.开单日期).getTime() : Date.now(), Date.now(),
-      body.是否错误 || '', body.批次号 || '', body.档口名称 || '',
-      body.上次结余 || null, body.累计结余 || null, body.付款金额 || null,
-      body.拿货件数 || null, body.退货件数 || null,
-      body.客户 || user.customer_name || '', body.地址 || '', user.phone, 'confirmed'
+      body.是否错误 ?? '', body.批次号 ?? '', body.档口名称 ?? '',
+      body.上次结余 ?? null, body.累计结余 ?? null, body.付款金额 ?? null,
+      body.拿货件数 ?? null, body.退货件数 ?? null,
+      body.客户 ?? user.customer_name ?? '', body.地址 ?? '', user.phone,
+      body.status ?? 'confirmed', body.单据性质 ?? ''
     );
-    return { success: true, id: r.lastInsertRowid };
+    const newId = r.lastInsertRowid;
+    const record = db.prepare('SELECT * FROM bills_1号 WHERE id = ?').get(newId);
+    return { success: true, id: newId, record };
   } finally { db.close(); }
 }
 
@@ -35,6 +38,7 @@ function list(query, authHeader) {
     let sql = 'SELECT * FROM bills_1号 WHERE 1=1';
     const params = [];
 
+    if (query.status) { sql += ' AND status = ?'; params.push(query.status); }
     if (query.档口名称) { sql += ' AND 档口名称 = ?'; params.push(query.档口名称); }
     if (query.dateFrom) { sql += ' AND 开单日期 >= ?'; params.push(new Date(query.dateFrom).getTime()); }
     if (query.dateTo) { sql += ' AND 开单日期 <= ?'; params.push(new Date(query.dateTo).getTime() + 86400000); }
@@ -51,7 +55,7 @@ function update(id, body, authHeader) {
 
   const db = getDb();
   try {
-    const fields = ['档口名称', '开单日期', '付款金额', '拿货件数', '退货件数', '上次结余', '累计结余', '客户', '地址', '是否错误', '批次号'];
+    const fields = ['档口名称', '开单日期', '付款金额', '拿货件数', '退货件数', '上次结余', '累计结余', '客户', '地址', '是否错误', '批次号', '单据性质', 'status'];
     const sets = [];
     const vals = [];
     for (const f of fields) {
@@ -78,4 +82,18 @@ function getShopNames(authHeader) {
   } finally { db.close(); }
 }
 
-module.exports = { save, list, update, getShopNames };
+function confirm(id, authHeader) {
+  const user = verifyToken(authHeader);
+  if (!user) return { error: '未登录' };
+
+  const db = getDb();
+  try {
+    const existing = db.prepare('SELECT * FROM bills_1号 WHERE id = ?').get(id);
+    if (!existing) return { error: '记录不存在' };
+    db.prepare('UPDATE bills_1号 SET status = ? WHERE id = ?').run('confirmed', id);
+    const record = db.prepare('SELECT * FROM bills_1号 WHERE id = ?').get(id);
+    return { success: true, record };
+  } finally { db.close(); }
+}
+
+module.exports = { save, list, update, getShopNames, confirm };

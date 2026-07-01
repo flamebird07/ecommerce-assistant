@@ -5,57 +5,80 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>票据管理</title>
 <style>
-  :root{--bg:#fafafa;--fg:#171717;--card:#fff;--border:#e5e5e5;--muted:#a3a3a3;--primary:#171717;--primary-fg:#fafafa;--accent:#f5f5f5;--radius:8px;--error:#ef4444;--ok:#22c55e;--warn:#eab308}
-  .dark{--bg:#0a0a0a;--fg:#e5e5e5;--card:#171717;--border:#262626;--muted:#737373;--primary:#e5e5e5;--primary-fg:#0a0a0a;--accent:#262626;--error:#f87171;--ok:#4ade80;--warn:#facc15}
-  *{margin:0;padding:0;box-sizing:border-box}
-  body{font-family:-apple-system,system-ui,sans-serif;background:var(--bg);color:var(--fg);line-height:1.5}
-  a{color:var(--fg);text-decoration:none}
-  .nav{border-bottom:1px solid var(--border);padding:0 24px;display:flex;align-items:center;height:56px;gap:24px}
-  .nav-brand{font-weight:700;font-size:15px}
-  .nav-links{display:flex;gap:4px}
-  .nav-link{padding:8px 12px;font-size:14px;color:var(--muted);border-radius:var(--radius);cursor:pointer;transition:all .15s}
-  .nav-link:hover,.nav-link.active{color:var(--fg);background:var(--accent)}
-  .nav-right{margin-left:auto;display:flex;align-items:center;gap:12px}
-  .nav-user{font-size:13px;color:var(--muted)}
-  .btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;font-size:14px;border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;background:var(--card);color:var(--fg);transition:all .15s}
-  .btn:hover{background:var(--accent)}
-  .btn-primary{background:var(--primary);color:var(--primary-fg);border-color:var(--primary)}
-  .btn-primary:hover{opacity:.9}
-  .btn-sm{padding:4px 10px;font-size:13px}
-  input,select{padding:8px 12px;font-size:14px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--fg);outline:none;transition:border .15s}
-  input:focus,select:focus{border-color:var(--muted)}
-  label{font-size:13px;color:var(--muted);margin-bottom:4px;display:block}
-  .form-group{margin-bottom:12px}
-  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
-  .card-header{font-size:15px;font-weight:600;margin-bottom:16px}
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  th{text-align:left;padding:8px 12px;font-weight:500;color:var(--muted);border-bottom:1px solid var(--border);font-size:12px;text-transform:uppercase;letter-spacing:.5px}
-  td{padding:10px 12px;border-bottom:1px solid var(--border)}
-  tr:hover td{background:var(--accent)}
-  .badge{display:inline-block;padding:2px 8px;font-size:11px;border-radius:9999px;font-weight:500}
-  .badge-ok{background:#dcfce7;color:#166534}
-  .badge-pending{background:#fef9c3;color:#854d0e}
-  .dark .badge-ok{background:#14532d;color:#86efac}
-  .dark .badge-pending{background:#713f12;color:#fde047}
-  .login-wrap{max-width:380px;margin:120px auto}
-  .login-wrap .card{padding:32px}
-  .login-wrap h2{text-align:center;font-size:20px;margin-bottom:24px}
-  .login-wrap .btn{width:100%;justify-content:center;margin-top:8px}
-  .login-wrap .switch{text-align:center;margin-top:16px;font-size:13px;color:var(--muted)}
-  .login-wrap .switch a{color:var(--fg);text-decoration:underline;cursor:pointer}
-  .error-msg{color:var(--error);font-size:13px;margin-top:4px}
-  .upload-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:48px;text-align:center;cursor:pointer;transition:all .15s}
-  .upload-zone:hover{border-color:var(--muted);background:var(--accent)}
-  .upload-zone input{display:none}
-  .upload-zone p{color:var(--muted);font-size:14px}
-  .ocr-card{border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-top:12px}
-  .ocr-card .fields{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
-  .ocr-card .actions{display:flex;gap:8px;margin-top:16px}
-  .filter-bar{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
-  .container{max-width:1200px;margin:0 auto;padding:24px}
-  .theme-toggle{cursor:pointer;padding:4px;color:var(--muted)}
-  .hidden{display:none!important}
-  .status-row{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+:root{--bg:#fafafa;--fg:#171717;--card:#fff;--border:#e5e5e5;--muted:#a3a3a3;--primary:#171717;--primary-fg:#fafafa;--accent:#f5f5f5;--radius:8px;--error:#ef4444;--ok:#22c55e;--warn:#eab308}
+.dark{--bg:#0a0a0a;--fg:#e5e5e5;--card:#171717;--border:#262626;--muted:#737373;--primary:#e5e5e5;--primary-fg:#0a0a0a;--accent:#262626;--error:#f87171;--ok:#4ade80;--warn:#facc15}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,system-ui,sans-serif;background:var(--bg);color:var(--fg);line-height:1.5}
+a{color:var(--fg);text-decoration:none}
+.nav{border-bottom:1px solid var(--border);padding:0 24px;display:flex;align-items:center;height:56px;gap:24px}
+.nav-brand{font-weight:700;font-size:15px}
+.nav-links{display:flex;gap:4px}
+.nav-link{padding:8px 12px;font-size:14px;color:var(--muted);border-radius:var(--radius);cursor:pointer;transition:all .15s}
+.nav-link:hover,.nav-link.active{color:var(--fg);background:var(--accent)}
+.nav-right{margin-left:auto;display:flex;align-items:center;gap:12px}
+.nav-user{font-size:13px;color:var(--muted)}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;font-size:14px;border:1px solid var(--border);border-radius:var(--radius);cursor:pointer;background:var(--card);color:var(--fg);transition:all .15s}
+.btn:hover{background:var(--accent)}
+.btn-primary{background:var(--primary);color:var(--primary-fg);border-color:var(--primary)}
+.btn-primary:hover{opacity:.9}
+.btn-sm{padding:4px 10px;font-size:13px}
+.btn-ok{background:var(--ok);color:#fff;border-color:var(--ok)}
+.btn-ok:hover{opacity:.9}
+input,select,textarea{padding:8px 12px;font-size:14px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--fg);outline:none;transition:border .15s;width:100%}
+input:focus,select:focus,textarea:focus{border-color:var(--muted)}
+label{font-size:13px;color:var(--muted);margin-bottom:4px;display:block}
+.form-group{margin-bottom:8px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
+.card-header{font-size:15px;font-weight:600;margin-bottom:16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.card-header .badge{margin-left:8px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:8px 12px;font-weight:500;color:var(--muted);border-bottom:1px solid var(--border);font-size:12px;text-transform:uppercase;letter-spacing:.5px}
+td{padding:10px 12px;border-bottom:1px solid var(--border)}
+tr:hover td{background:var(--accent)}
+.badge{display:inline-block;padding:2px 8px;font-size:11px;border-radius:9999px;font-weight:500}
+.badge-ok{background:#dcfce7;color:#166534}
+.badge-pending{background:#fef9c3;color:#854d0e}
+.badge-error{background:#fee2e2;color:#991b1b}
+.dark .badge-ok{background:#14532d;color:#86efac}
+.dark .badge-pending{background:#713f12;color:#fde047}
+.dark .badge-error{background:#450a0a;color:#fca5a5}
+.login-wrap{max-width:380px;margin:120px auto}
+.login-wrap .card{padding:32px}
+.login-wrap h2{text-align:center;font-size:20px;margin-bottom:24px}
+.login-wrap .btn{width:100%;justify-content:center;margin-top:8px}
+.login-wrap .switch{text-align:center;margin-top:16px;font-size:13px;color:var(--muted)}
+.login-wrap .switch a{color:var(--fg);text-decoration:underline;cursor:pointer}
+.error-msg{color:var(--error);font-size:13px;margin-top:4px}
+.upload-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:48px 24px;text-align:center;cursor:pointer;transition:all .15s}
+.upload-zone:hover,.upload-zone.dragover{border-color:var(--muted);background:var(--accent)}
+.upload-zone input{display:none}
+.upload-zone p{color:var(--muted);font-size:14px}
+.upload-zone .icon{font-size:48px;margin-bottom:12px}
+.progress-bar{width:100%;height:6px;background:var(--accent);border-radius:3px;margin-top:16px;overflow:hidden}
+.progress-bar .fill{height:100%;background:var(--ok);border-radius:3px;transition:width .3s}
+.upload-status{margin-top:12px;font-size:13px;color:var(--muted)}
+.draft-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:12px;overflow:hidden;transition:border .15s}
+.draft-card:hover{border-color:var(--muted)}
+.draft-header{display:flex;align-items:center;padding:12px 16px;gap:12px;cursor:pointer;user-select:none}
+.draft-header .draft-title{font-weight:600;font-size:14px;flex:1}
+.draft-header .draft-meta{font-size:12px;color:var(--muted)}
+.draft-body{padding:0 16px 16px;display:none}
+.draft-body.open{display:block}
+.draft-fields{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px}
+.draft-actions{display:flex;gap:8px;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)}
+.filter-bar{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center}
+.container{max-width:1200px;margin:0 auto;padding:24px}
+.theme-toggle{cursor:pointer;padding:4px;color:var(--muted)}
+.hidden{display:none!important}
+.bulk-bar{display:flex;gap:8px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+.count-badge{font-size:12px;color:var(--muted);background:var(--accent);padding:2px 8px;border-radius:9999px}
+.thumb{width:48px;height:48px;object-fit:cover;border-radius:4px;border:1px solid var(--border)}
+.ocr-preview{margin-top:8px}
+.ocr-preview summary{cursor:pointer;font-size:13px;color:var(--muted);padding:4px 0}
+.ocr-preview pre{font-size:12px;margin-top:8px;white-space:pre-wrap;max-height:200px;overflow:auto;padding:12px;background:var(--accent);border-radius:var(--radius)}
+.check-all-wrap{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
+.check-all-wrap input[type=checkbox]{width:auto;accent-color:var(--primary)}
+.draft-header input[type=checkbox]{width:auto;accent-color:var(--primary)}
 </style>
 </head>
 <body>
@@ -80,8 +103,8 @@
   <nav class="nav">
     <div class="nav-brand">📋 票据管理</div>
     <div class="nav-links">
-      <div class="nav-link active" data-tab="upload" onclick="switchTab('upload')">录入</div>
-      <div class="nav-link" data-tab="list" onclick="switchTab('list')">列表</div>
+      <div class="nav-link active" data-tab="entry" onclick="switchTab('entry')">录入</div>
+      <div class="nav-link" data-tab="confirmed" onclick="switchTab('confirmed')">已确认</div>
     </div>
     <div class="nav-right">
       <span class="nav-user" id="userDisplay"></span>
@@ -90,29 +113,62 @@
     </div>
   </nav>
   <div class="container">
-    <div id="tabUpload">
-      <div class="card">
-        <div class="card-header">上传票据</div>
-        <div class="upload-zone" onclick="document.getElementById('fileInput').click()">
-          <input type="file" id="fileInput" accept="image/*" multiple onchange="handleUpload(this.files)">
-          <p>📷 点击上传票据图片</p>
-          <p style="font-size:12px;margin-top:4px;">支持jpg/png，可批量上传</p>
+    <!-- 录入Tab: 上传 + 待确认列表 -->
+    <div id="tabEntry">
+      <!-- 上传区域 -->
+      <div class="card" style="margin-bottom:20px">
+        <div class="card-header">📷 上传票据</div>
+        <div class="upload-zone" id="uploadZone">
+          <input type="file" id="fileInput" accept="image/*" multiple>
+          <div class="icon">📷</div>
+          <p><strong>点击选择或拖拽图片到此处</strong></p>
+          <p style="font-size:12px;margin-top:4px;">支持 jpg/png，可同时选择30+张图片</p>
         </div>
-        <div id="ocrResults"></div>
+        <div id="uploadProgress" class="hidden">
+          <div class="upload-status" id="uploadStatus">准备上传...</div>
+          <div class="progress-bar"><div class="fill" id="progressFill" style="width:0"></div></div>
+          <div id="uploadLog" style="margin-top:8px;max-height:150px;overflow:auto;font-size:12px"></div>
+        </div>
+      </div>
+
+      <!-- 待确认列表 -->
+      <div class="card">
+        <div class="card-header">
+          待确认记录
+          <span class="count-badge" id="draftCount">0</span>
+          <button class="btn btn-sm" onclick="loadDrafts()" style="margin-left:auto">🔄 刷新</button>
+          <button class="btn btn-sm" onclick="toggleAllDrafts()">全部展开/折叠</button>
+          <button class="btn btn-ok btn-sm" onclick="confirmSelected()">✅ 全部确认</button>
+          <button class="btn btn-sm" onclick="deleteSelected()">🗑 删除选中</button>
+        </div>
+        <div class="bulk-bar">
+          <label class="check-all-wrap"><input type="checkbox" id="checkAll" onchange="toggleCheckAll(this)"> 全选</label>
+        </div>
+        <div id="draftList"></div>
       </div>
     </div>
-    <div id="tabList" class="hidden">
+
+    <!-- 已确认Tab -->
+    <div id="tabConfirmed" class="hidden">
       <div class="card">
-        <div class="card-header">票据列表</div>
-        <div class="filter-bar">
-          <select id="filterShop" onchange="loadBills()"><option value="">全部档口</option></select>
-          <input type="date" id="filterFrom" onchange="loadBills()">
-          <input type="date" id="filterTo" onchange="loadBills()">
+        <div class="card-header">
+          已确认记录
+          <span class="count-badge" id="confirmedCount">0</span>
         </div>
-        <table>
-          <thead><tr><th>批次号</th><th>档口</th><th>日期</th><th>付款</th><th>拿货</th><th>退货</th><th>结余</th><th>性质</th><th>操作</th></tr></thead>
-          <tbody id="billBody"></tbody>
-        </table>
+        <div class="filter-bar">
+          <select id="filterShop" onchange="loadConfirmed()"><option value="">全部档口</option></select>
+          <input type="date" id="filterFrom" onchange="loadConfirmed()" style="width:auto">
+          <span style="color:var(--muted);font-size:13px">至</span>
+          <input type="date" id="filterTo" onchange="loadConfirmed()" style="width:auto">
+          <button class="btn btn-sm" onclick="loadConfirmed()">筛选</button>
+          <button class="btn btn-sm" onclick="clearFilters()">清除</button>
+        </div>
+        <div style="overflow-x:auto">
+          <table>
+            <thead><tr><th>批次号</th><th>档口</th><th>日期</th><th>付款</th><th>拿货</th><th>退货</th><th>上次结余</th><th>累计结余</th><th>客户</th><th>地址</th><th>性质</th><th>是否错误</th></tr></thead>
+            <tbody id="confirmedBody"></tbody>
+          </table>
+        </div>
       </div>
     </div>
   </div>
@@ -123,11 +179,16 @@ const API='/api/bill';
 let token=localStorage.getItem('bill_token');
 let currentUser=null;
 let isRegister=false;
+let allExpanded=true;
+let pendingFiles=[];
+let uploading=false;
 
+// Theme
 if(localStorage.getItem('theme')==='dark'||(!localStorage.getItem('theme')&&matchMedia('(prefers-color-scheme:dark)').matches))
   document.documentElement.classList.add('dark');
 function toggleTheme(){document.documentElement.classList.toggle('dark');localStorage.setItem('theme',document.documentElement.classList.contains('dark')?'dark':'light')}
 
+// Auth
 function toggleAuthMode(){
   isRegister=!isRegister;
   document.getElementById('authTitle').textContent=isRegister?'注册':'登录';
@@ -160,85 +221,239 @@ function showMain(){
   document.getElementById('mainPage').classList.remove('hidden');
   document.getElementById('userDisplay').textContent=`${currentUser.nickname||currentUser.phone} · ${currentUser.customer_name||''}`;
   loadShops();
+  loadDrafts();
 }
 
 function switchTab(tab){
   document.querySelectorAll('.nav-link').forEach(el=>el.classList.toggle('active',el.dataset.tab===tab));
-  document.getElementById('tabUpload').classList.toggle('hidden',tab!=='upload');
-  document.getElementById('tabList').classList.toggle('hidden',tab!=='list');
-  if(tab==='list')loadBills();
+  document.getElementById('tabEntry').classList.toggle('hidden',tab!=='entry');
+  document.getElementById('tabConfirmed').classList.toggle('hidden',tab!=='confirmed');
+  if(tab==='confirmed')loadConfirmed();
+  if(tab==='entry')loadDrafts();
 }
 
-async function handleUpload(files){
-  if(!files.length)return;
-  const div=document.getElementById('ocrResults');
-  div.innerHTML='<p style="color:var(--muted)">识别中...</p>';
-  for(const file of files){
+// Upload with drag & drop
+const uploadZone=document.getElementById('uploadZone');
+const fileInput=document.getElementById('fileInput');
+
+uploadZone.addEventListener('click',()=>fileInput.click());
+uploadZone.addEventListener('dragover',e=>{e.preventDefault();uploadZone.classList.add('dragover');});
+uploadZone.addEventListener('dragleave',()=>uploadZone.classList.remove('dragover'));
+uploadZone.addEventListener('drop',e=>{e.preventDefault();uploadZone.classList.remove('dragover');if(e.dataTransfer.files.length)handleFiles(e.dataTransfer.files);});
+fileInput.addEventListener('change',e=>{if(e.target.files.length)handleFiles(e.target.files);e.target.value='';});
+
+async function handleFiles(files){
+  if(uploading)return;
+  pendingFiles=Array.from(files);
+  if(!pendingFiles.length)return;
+  uploading=true;
+  const total=pendingFiles.length;
+  const progressDiv=document.getElementById('uploadProgress');
+  const statusDiv=document.getElementById('uploadStatus');
+  const fill=document.getElementById('progressFill');
+  const logDiv=document.getElementById('uploadLog');
+  progressDiv.classList.remove('hidden');
+  logDiv.innerHTML='';
+  let done=0,ok=0,fail=0;
+  for(let i=0;i<total;i++){
+    const file=pendingFiles[i];
+    statusDiv.textContent=`正在识别 ${i+1}/${total}: ${file.name}`;
+    fill.style.width=`${(i/total)*100}%`;
     const fd=new FormData();fd.append('image',file);
     try{
       const res=await fetch(API+'/ocr',{method:'POST',headers:{'Authorization':'Bearer '+token},body:fd});
       const data=await res.json();
-      if(data.error){div.innerHTML+=`<p class="error-msg">${data.error}</p>`;continue;}
-      renderOcr(data,file.name,div);
-    }catch(e){div.innerHTML+=`<p class="error-msg">上传失败: ${e.message}</p>`;}
+      if(data.error){
+        fail++;
+        logDiv.innerHTML+=`<div style="color:var(--error)">❌ ${file.name}: ${data.error}</div>`;
+      }else{
+        ok++;
+        logDiv.innerHTML+=`<div style="color:var(--ok)">✅ ${file.name} → ID:${data.id} (${data.档口名称||'未知档口'})</div>`;
+      }
+    }catch(e){
+      fail++;
+      logDiv.innerHTML+=`<div style="color:var(--error)">❌ ${file.name}: ${e.message}</div>`;
+    }
+    logDiv.scrollTop=logDiv.scrollHeight;
+    done++;
   }
+  fill.style.width='100%';
+  statusDiv.textContent=`完成！共 ${total} 张：成功 ${ok}，失败 ${fail}`;
+  uploading=false;
+  pendingFiles=[];
+  loadDrafts();
+  setTimeout(()=>{progressDiv.classList.add('hidden');},5000);
 }
 
-function renderOcr(data,name,container){
-  const d=document.createElement('div');d.className='ocr-card';
-  d.innerHTML=`
-    <div class="status-row"><strong>${name}</strong><span class="badge badge-pending">待确认</span></div>
-    <div class="fields">
-      <div class="form-group"><label>批次号</label><input data-k="批次号" value="${data.批次号||''}"></div>
-      <div class="form-group"><label>档口名称</label><input data-k="档口名称" value="${data.档口名称||''}"></div>
-      <div class="form-group"><label>开单日期</label><input data-k="开单日期" type="date" value="${data.开单日期||''}"></div>
-      <div class="form-group"><label>付款金额</label><input data-k="付款金额" type="number" value="${data.付款金额||''}"></div>
-      <div class="form-group"><label>拿货件数</label><input data-k="拿货件数" type="number" value="${data.拿货件数||''}"></div>
-      <div class="form-group"><label>退货件数</label><input data-k="退货件数" type="number" value="${data.退货件数||''}"></div>
-      <div class="form-group"><label>上次结余</label><input data-k="上次结余" type="number" value="${data.上次结余||''}"></div>
-      <div class="form-group"><label>累计结余</label><input data-k="累计结余" type="number" value="${data.累计结余||''}"></div>
-      <div class="form-group"><label>客户</label><input data-k="客户" value="${data.客户||''}"></div>
-      <div class="form-group"><label>地址</label><input data-k="地址" value="${data.地址||''}"></div>
-    </div>
-    <details style="margin-top:12px"><summary style="cursor:pointer;font-size:13px;color:var(--muted)">OCR原文</summary><pre style="font-size:12px;margin-top:8px;white-space:pre-wrap;max-height:200px;overflow:auto;padding:12px;background:var(--accent);border-radius:var(--radius)">${data.raw_text||''}</pre></details>
-    <div class="actions">
-      <button class="btn btn-primary btn-sm" onclick="confirmBill(this)">确认保存</button>
-      <button class="btn btn-sm" onclick="this.closest('.ocr-card').remove()">取消</button>
-    </div>`;
-  d.dataset.raw=JSON.stringify(data);
-  container.appendChild(d);
-}
-
-async function confirmBill(btn){
-  const card=btn.closest('.ocr-card');
-  const data=JSON.parse(card.dataset.raw);
-  card.querySelectorAll('[data-k]').forEach(inp=>{
-    let v=inp.value;
-    if(inp.type==='number'&&v)v=parseFloat(v);
-    data[inp.dataset.k]=v;
-  });
-  data.单据内容=data.raw_text;
-  data.单据截图=data.image_path;
+// Drafts
+async function loadDrafts(){
+  const div=document.getElementById('draftList');
+  div.innerHTML='<p style="color:var(--muted)">加载中...</p>';
   try{
-    const res=await fetch(API+'/bills',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify(data)});
+    const res=await fetch(API+'/bills?status=draft',{headers:{'Authorization':'Bearer '+token}});
+    const data=await res.json();
+    const bills=data.bills||[];
+    document.getElementById('draftCount').textContent=bills.length;
+    if(!bills.length){div.innerHTML='<p style="color:var(--muted)">暂无待确认记录</p>';return;}
+    div.innerHTML=bills.map(b=>{
+      const dt=b.开单日期?new Date(b.开单日期).toISOString().split('T')[0]:'';
+      const isErr=b.是否错误===true||b.是否错误==='true'||b.是否错误==='是';
+      return `
+      <div class="draft-card" data-id="${b.id}">
+        <div class="draft-header" onclick="toggleDraft(this)">
+          <input type="checkbox" class="draft-check" data-id="${b.id}" onclick="event.stopPropagation()">
+          <span class="draft-title">${b.档口名称||'未知档口'} · ${dt||'无日期'} · ¥${b.付款金额||0}</span>
+          <span class="badge badge-pending">待确认</span>
+          <span class="draft-meta">ID:${b.id}</span>
+          <span style="color:var(--muted);font-size:12px">▼</span>
+        </div>
+        <div class="draft-body${allExpanded?' open':''}">
+          <div class="draft-fields">
+            <div class="form-group"><label>批次号</label><input data-k="批次号" value="${esc(b.批次号)}"></div>
+            <div class="form-group"><label>档口名称</label><input data-k="档口名称" value="${esc(b.档口名称)}"></div>
+            <div class="form-group"><label>开单日期</label><input data-k="开单日期" type="date" value="${dt}"></div>
+            <div class="form-group"><label>付款金额</label><input data-k="付款金额" type="number" step="0.01" value="${b.付款金额||''}"></div>
+            <div class="form-group"><label>拿货件数</label><input data-k="拿货件数" type="number" value="${b.拿货件数||''}"></div>
+            <div class="form-group"><label>退货件数</label><input data-k="退货件数" type="number" value="${b.退货件数||''}"></div>
+            <div class="form-group"><label>上次结余</label><input data-k="上次结余" type="number" step="0.01" value="${b.上次结余||''}"></div>
+            <div class="form-group"><label>累计结余</label><input data-k="累计结余" type="number" step="0.01" value="${b.累计结余||''}"></div>
+            <div class="form-group"><label>客户</label><input data-k="客户" value="${esc(b.客户)}"></div>
+            <div class="form-group"><label>地址</label><input data-k="地址" value="${esc(b.地址)}"></div>
+            <div class="form-group"><label>单据性质</label><input data-k="单据性质" value="${esc(b.单据性质)}"></div>
+            <div class="form-group"><label>是否错误</label>
+              <select data-k="是否错误"><option value="否" ${isErr?'':'selected'}>否</option><option value="是" ${isErr?'selected':''}>是</option></select>
+            </div>
+          </div>
+          ${b.截图?`<div style="margin-top:8px"><label>单据截图</label><img class="thumb" src="${b.截图}" onclick="window.open(this.src)" style="cursor:pointer"></div>`:''}
+          <details class="ocr-preview"><summary>查看OCR原文</summary><pre>${esc(b.单据内容||'')}</pre></details>
+          <div class="draft-actions">
+            <button class="btn btn-sm" onclick="saveDraft(${b.id},this)">💾 保存修改</button>
+            <button class="btn btn-primary btn-sm" onclick="confirmDraft(${b.id},this)">✅ 确认入库</button>
+            <button class="btn btn-sm" onclick="deleteDraft(${b.id},this)" style="color:var(--error)">🗑 删除</button>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+  }catch(e){div.innerHTML=`<p class="error-msg">加载失败: ${e.message}</p>`;}
+}
+
+function esc(s){if(s==null)return '';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+
+function toggleDraft(header){
+  const body=header.nextElementSibling;
+  body.classList.toggle('open');
+  const arrow=header.querySelector('span:last-child');
+  arrow.textContent=body.classList.contains('open')?'▼':'▶';
+}
+
+function toggleAllDrafts(){
+  allExpanded=!allExpanded;
+  document.querySelectorAll('.draft-body').forEach(el=>el.classList.toggle('open',allExpanded));
+  document.querySelectorAll('.draft-header span:last-child').forEach(el=>el.textContent=allExpanded?'▼':'▶');
+}
+
+function toggleCheckAll(cb){
+  document.querySelectorAll('.draft-check').forEach(c=>c.checked=cb.checked);
+}
+
+function getSelectedIds(){
+  return Array.from(document.querySelectorAll('.draft-check:checked')).map(c=>parseInt(c.dataset.id));
+}
+
+async function saveDraft(id,btn){
+  const card=btn.closest('.draft-card');
+  const body=collectFields(card);
+  try{
+    const res=await fetch(API+'/bills/'+id,{method:'PUT',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify(body)});
     const r=await res.json();
-    if(r.success){card.querySelector('.badge').className='badge badge-ok';card.querySelector('.badge').textContent='已保存';btn.disabled=true;btn.textContent='已保存';}
+    if(r.success){btn.textContent='✅ 已保存';setTimeout(()=>btn.textContent='💾 保存修改',1500);}
     else alert('保存失败: '+(r.error||''));
   }catch(e){alert('网络错误: '+e.message);}
 }
 
-async function loadBills(){
+function collectFields(card){
+  const body={};
+  card.querySelectorAll('[data-k]').forEach(inp=>{
+    let v=inp.value;
+    if(inp.type==='number'&&v)v=parseFloat(v);
+    body[inp.dataset.k]=v;
+  });
+  return body;
+}
+
+async function confirmDraft(id,btn){
+  if(!confirm('确认此记录入库？'))return;
+  const card=btn.closest('.draft-card');
+  const body=collectFields(card);
+  body.status='confirmed';
+  try{
+    const res=await fetch(API+'/bills/'+id,{method:'PUT',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify(body)});
+    const r=await res.json();
+    if(r.success){card.remove();updateDraftCount();}
+    else alert('确认失败: '+(r.error||''));
+  }catch(e){alert('网络错误: '+e.message);}
+}
+
+async function deleteDraft(id,btn){
+  if(!confirm('删除此记录？'))return;
+  try{
+    const res=await fetch(API+'/bills/'+id,{method:'DELETE',headers:{'Authorization':'Bearer '+token}});
+    const r=await res.json();
+    if(r.success){const card=btn.closest('.draft-card');card.remove();updateDraftCount();}
+    else alert('删除失败: '+(r.error||''));
+  }catch(e){alert('网络错误: '+e.message);}
+}
+
+async function confirmSelected(){
+  const ids=getSelectedIds();
+  if(!ids.length){alert('请先勾选要确认的记录');return;}
+  if(!confirm(`确认 ${ids.length} 条记录入库？`))return;
+  for(const id of ids){
+    try{
+      const card=document.querySelector(`.draft-card[data-id="${id}"]`);
+      const body=card?collectFields(card):{};
+      body.status='confirmed';
+      await fetch(API+'/bills/'+id,{method:'PUT',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify(body)});
+      if(card)card.remove();
+    }catch(e){}
+  }
+  updateDraftCount();
+  loadDrafts();
+}
+
+async function deleteSelected(){
+  const ids=getSelectedIds();
+  if(!ids.length){alert('请先勾选要删除的记录');return;}
+  if(!confirm(`删除 ${ids.length} 条记录？`))return;
+  for(const id of ids){
+    try{
+      await fetch(API+'/bills/'+id,{method:'DELETE',headers:{'Authorization':'Bearer '+token}});
+    }catch(e){}
+  }
+  updateDraftCount();
+  loadDrafts();
+}
+
+function updateDraftCount(){
+  document.getElementById('draftCount').textContent=document.querySelectorAll('.draft-card').length;
+  document.getElementById('checkAll').checked=false;
+}
+
+// Confirmed list
+async function loadConfirmed(){
   const shop=document.getElementById('filterShop').value;
   const from=document.getElementById('filterFrom').value;
   const to=document.getElementById('filterTo').value;
-  let url=API+'/bills?';
-  if(shop)url+=`档口名称=${encodeURIComponent(shop)}&`;
-  if(from)url+=`dateFrom=${from}&`;
-  if(to)url+=`dateTo=${to}&`;
+  let url=API+'/bills?status=confirmed';
+  if(shop)url+=`&档口名称=${encodeURIComponent(shop)}`;
+  if(from)url+=`&dateFrom=${from}`;
+  if(to)url+=`&dateTo=${to}`;
   try{
     const res=await fetch(url,{headers:{'Authorization':'Bearer '+token}});
     const data=await res.json();
-    document.getElementById('billBody').innerHTML=(data.bills||[]).map(b=>`
+    const bills=data.bills||[];
+    document.getElementById('confirmedCount').textContent=bills.length;
+    document.getElementById('confirmedBody').innerHTML=bills.length?bills.map(b=>`
       <tr>
         <td>${b.批次号||''}</td>
         <td>${b.档口名称||''}</td>
@@ -246,11 +461,21 @@ async function loadBills(){
         <td>${b.付款金额||''}</td>
         <td>${b.拿货件数||''}</td>
         <td>${b.退货件数||''}</td>
+        <td>${b.上次结余||''}</td>
         <td>${b.累计结余||''}</td>
+        <td>${b.客户||''}</td>
+        <td>${b.地址||''}</td>
         <td>${b.单据性质||''}</td>
-        <td><button class="btn btn-sm" onclick="editBill(${b.id})">编辑</button></td>
-      </tr>`).join('');
-  }catch(e){}
+        <td>${b.是否错误==='是'||b.是否错误===true?'<span class="badge badge-error">错误</span>':'<span class="badge badge-ok">正常</span>'}</td>
+      </tr>`).join(''):'<tr><td colspan="12" style="text-align:center;color:var(--muted)">暂无记录</td></tr>';
+  }catch(e){document.getElementById('confirmedBody').innerHTML=`<tr><td colspan="12" class="error-msg">${e.message}</td></tr>`;}
+}
+
+function clearFilters(){
+  document.getElementById('filterShop').value='';
+  document.getElementById('filterFrom').value='';
+  document.getElementById('filterTo').value='';
+  loadConfirmed();
 }
 
 async function loadShops(){
@@ -261,11 +486,15 @@ async function loadShops(){
   }catch(e){}
 }
 
+// Auto-login
 if(token){
   fetch(API+'/me',{headers:{'Authorization':'Bearer '+token}}).then(r=>r.json()).then(d=>{
     if(d.user){currentUser=d.user;showMain();}
   }).catch(()=>{});
 }
+
+// Keyboard shortcut: Enter to login
+document.getElementById('authPassword').addEventListener('keydown',e=>{if(e.key==='Enter')doAuth();});
 </script>
 </body>
 </html>
